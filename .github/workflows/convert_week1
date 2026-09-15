@@ -1,0 +1,62 @@
+options(stringsAsFactors = FALSE)
+
+# Diagnostic converter for nflverse raw 2026 per-game RDS assets.
+# It intentionally inspects the first game's true structure before we adapt
+# the final exact scorer, avoiding further guesses about the raw schema.
+
+base_url <- "https://github.com/nflverse/nflverse-pbp/releases/download/raw_pbp_2026"
+
+games <- c(
+  "ARI_LAC","ATL_PIT","BAL_IND","BUF_HOU","CHI_CAR","CLE_JAX",
+  "DAL_NYG","DEN_KC","GB_MIN","MIA_LV","NE_SEA","NO_DET",
+  "NYJ_TEN","SF_LA","TB_CIN","WAS_PHI"
+)
+
+dir.create("rds", showWarnings = FALSE)
+
+download_game <- function(g) {
+  fn <- paste0("2026_01_", g, ".rds")
+  dest <- file.path("rds", fn)
+  if (!file.exists(dest)) {
+    url <- paste0(base_url, "/", fn)
+    cat("Downloading ", url, "\n", sep="")
+    download.file(url, dest, mode="wb", quiet=FALSE)
+  }
+  dest
+}
+
+# First inspect the raw object exactly. nflverse describes these release
+# assets as raw JSON PBP data that powers nflfastR, so they need not have
+# the processed nflfastR dataframe schema.
+path <- download_game(games[1])
+x <- readRDS(path)
+
+cat("\n========== NFLVERSE RAW RDS DIAGNOSTIC ==========\n")
+cat("file: ", path, "\n", sep="")
+cat("class: ", paste(class(x), collapse=", "), "\n", sep="")
+cat("typeof: ", typeof(x), "\n", sep="")
+cat("length: ", length(x), "\n", sep="")
+cat("dimensions: ",
+    if (is.null(dim(x))) "<none>" else paste(dim(x), collapse=" x "),
+    "\n", sep="")
+if (!is.null(names(x))) {
+  cat("top-level names:\n")
+  print(head(names(x), 100))
+}
+cat("\nstructure (max.level=5):\n")
+str(x, max.level=5, list.len=100, give.attr=TRUE)
+
+if (is.list(x) && length(x) > 0) {
+  cat("\nfirst element class: ", paste(class(x[[1]]), collapse=", "), "\n", sep="")
+  cat("first element typeof: ", typeof(x[[1]]), "\n", sep="")
+  if (!is.null(names(x[[1]]))) {
+    cat("first element names:\n")
+    print(head(names(x[[1]]), 100))
+  }
+  cat("\nfirst element structure:\n")
+  str(x[[1]], max.level=5, list.len=100, give.attr=TRUE)
+}
+
+cat("\n========== END DIAGNOSTIC ==========\n")
+cat("DEN_KC is included in the 16-game list for the final converter.\n")
+cat("Diagnostic completed successfully.\n")
