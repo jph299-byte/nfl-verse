@@ -466,10 +466,7 @@ for (i in seq_len(nrow(dat))) {
 
   if (w + 1 <= 19) {
 
-    r_next <-
-      rating_snapshots[
-        [as.character(w + 1)]
-      ]
+    r_next <- rating_snapshots[[as.character(w + 1)]]
 
     if (
       !is.null(r_next) &&
