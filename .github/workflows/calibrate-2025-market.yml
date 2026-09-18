@@ -1,0 +1,33 @@
+name: Calibrate 2025 Against Market
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  calibrate-market:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+
+      - name: Run situational calibration first
+        run: Rscript calibrate_2025.R
+
+      - name: Run market calibration
+        run: Rscript calibrate_2025_market.R
+
+      - name: Upload market calibration
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfl-numbers-2025-market-calibration
+          path: |
+            market_calibration_2025/
+          if-no-files-found: error
+          retention-days: 90
