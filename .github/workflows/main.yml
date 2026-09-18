@@ -4,13 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       week:
-        description: "NFL week (leave blank for latest available week)"
+        description: "NFL week — leave blank for latest available"
         required: false
         type: string
 
   schedule:
-    # 10:00 UTC Friday, Monday and Tuesday.
-    # Friday captures TNF; Monday captures Sunday; Tuesday captures MNF.
     - cron: "0 10 * * 1,2,5"
 
 permissions:
@@ -27,18 +25,13 @@ jobs:
       - name: Set up R
         uses: r-lib/actions/setup-r@v2
 
-      - name: Determine requested week
-        id: week
-        shell: bash
-        run: |
-          if [ -n "${{ github.event.inputs.week }}" ]; then
-            echo "week=${{ github.event.inputs.week }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "week=auto" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Convert and score NFL games
-        run: Rscript convert_week.R "${{ steps.week.outputs.week }}"
+        run: |
+          WEEK="${{ github.event.inputs.week }}"
+          if [ -z "$WEEK" ]; then
+            WEEK="auto"
+          fi
+          Rscript convert_week.R "$WEEK"
 
       - name: Read detected week
         id: detected
@@ -54,6 +47,7 @@ jobs:
           path: |
             week${{ steps.detected.outputs.week }}_exact_results.csv
             week${{ steps.detected.outputs.week }}_results.js
+            output/week*/
             csv/
           if-no-files-found: error
           retention-days: 90
