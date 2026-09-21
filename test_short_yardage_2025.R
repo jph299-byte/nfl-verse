@@ -19,7 +19,7 @@ need <- c("game_id","week","posteam","defteam","down","ydstogo","yards_gained",
           "desc","penalty","penalty_team","penalty_yards","penalty_type",
           "interception","fumble","qb_kneel","touchdown","total_home_score",
           "total_away_score","home_team","away_team","passing_yards",
-          "rushing_yards","sack_yards")
+          "rushing_yards","sack")
 missing <- setdiff(need, names(pbp))
 if (length(missing)) stop("Missing PBP columns: ", paste(missing, collapse=", "))
 
@@ -185,17 +185,25 @@ scores <- pbp |>
     away_points = total_away_score
   )
 
-# Official-style net offense from nflverse play components:
-# passing_yards + rushing_yards + sack_yards (sack_yards is negative).
-# Aggregate by posteam.
+# Net offense: nflverse 2025 PBP does not expose a `sack_yards` column.
+# `passing_yards` is credited only on completed passes, while sacks are
+# represented by negative `yards_gained`. Add those negative sack gains
+# to passing + rushing to reproduce net offensive yardage.
 yards <- pbp |>
   filter(!is.na(posteam)) |>
+  mutate(
+    sack_net_yards = ifelse(
+      coalesce(sack, 0) == 1,
+      pmin(num0(yards_gained), 0),
+      0
+    )
+  ) |>
   group_by(game_id, week, posteam) |>
   summarise(
     official_offensive_yards =
       sum(num0(passing_yards), na.rm=TRUE) +
       sum(num0(rushing_yards), na.rm=TRUE) +
-      sum(num0(sack_yards), na.rm=TRUE),
+      sum(sack_net_yards, na.rm=TRUE),
     .groups="drop"
   )
 
