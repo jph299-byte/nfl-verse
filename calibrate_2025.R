@@ -643,19 +643,19 @@ summary_lines <- c(
 
 write.csv(
   team_game,
-  "calibration_2025/team_game_calibration_penalty_aware.csv",
+  "calibration_2025/team_game_calibration.csv",
   row.names = FALSE
 )
 
 write.csv(
   test,
-  "calibration_2025/out_of_sample_weeks13_18_penalty_aware.csv",
+  "calibration_2025/out_of_sample_weeks13_18.csv",
   row.names = FALSE
 )
 
 writeLines(
   summary_lines,
-  "calibration_2025/calibration_summary_penalty_aware.txt"
+  "calibration_2025/calibration_summary.txt"
 )
 
 cat("\n")
