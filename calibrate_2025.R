@@ -2,17 +2,24 @@ options(stringsAsFactors = FALSE)
 
 # ============================================================
 # NFL NUMBERS — 2025 SITUATIONAL MODEL CALIBRATION
+# PENALTY-AWARE VERSION
 #
-# Purpose:
-#   Apply the established NFL Numbers situational play formula
-#   to the complete 2025 REGULAR SEASON and determine how raw
-#   situational units should convert to NFL points.
+# Penalty rules:
+#   football rush/pass yards                  = 100%
+#   accepted live-possession penalty yards   = 50%
+#   declined penalties                       = 0 additional effect
+#   dead-ball/post-play/between-downs         = 0 penalty effect
+#   kickoff/XP/non-offensive enforcement     = 0 offensive Situation effect
+#   defensive penalties converting 3rd/4th   = preserve conversion benefit
 #
-# IMPORTANT:
-#   This does NOT alter the play-scoring model.
+# Existing rules retained:
+#   any fumble = -1 event penalty
+#   interception gain = 0, plus turnover penalty
+#   kneel = 0
 # ============================================================
 
 SEASON <- 2025
+PENALTY_YARD_WEIGHT <- 0.50
 
 PBP_URL <- paste0(
   "https://github.com/nflverse/nflverse-data/releases/download/pbp/",
@@ -20,10 +27,6 @@ PBP_URL <- paste0(
 )
 
 dir.create("calibration_2025", showWarnings = FALSE)
-
-# ------------------------------------------------------------
-# 1. Download 2025 nflverse PBP
-# ------------------------------------------------------------
 
 dest <- "calibration_2025/play_by_play_2025.csv.gz"
 
@@ -34,26 +37,15 @@ if (!file.exists(dest)) {
 
 cat("Reading play-by-play...\n")
 pbp <- read.csv(gzfile(dest), stringsAsFactors = FALSE)
-
 cat("Rows loaded:", nrow(pbp), "\n")
 
-# ------------------------------------------------------------
-# 2. Keep REGULAR SEASON only
-# ------------------------------------------------------------
-
-if ("season_type" %in% names(pbp)) {
+if ("season_type" %in% names(pbp))
   pbp <- pbp[pbp$season_type == "REG", ]
-}
 
-if ("week" %in% names(pbp)) {
+if ("week" %in% names(pbp))
   pbp <- pbp[pbp$week >= 1 & pbp$week <= 18, ]
-}
 
 cat("Regular-season rows:", nrow(pbp), "\n")
-
-# ------------------------------------------------------------
-# 3. Helpers
-# ------------------------------------------------------------
 
 as_num <- function(x) suppressWarnings(as.numeric(x))
 
@@ -62,21 +54,20 @@ flag <- function(x) {
   !is.na(x) & as.character(x) %in% c("1", "TRUE", "true", "T")
 }
 
-# EXACT CURRENT NFL NUMBERS PLAY FORMULA
+txt_has <- function(x, pattern) {
+  !is.na(x) & grepl(pattern, x, ignore.case = TRUE, perl = TRUE)
+}
 
 play_value <- function(down, togo, gain,
                        turnover = FALSE,
-                       kneel = FALSE) {
+                       kneel = FALSE,
+                       force_conversion = FALSE) {
 
   if (isTRUE(kneel)) return(0)
 
-  if (
-    is.na(down) ||
-    is.na(togo) ||
-    is.na(gain) ||
-    togo <= 0 ||
-    !(down %in% 1:4)
-  ) return(NA_real_)
+  if (is.na(down) || is.na(togo) || is.na(gain) ||
+      togo <= 0 || !(down %in% 1:4))
+    return(NA_real_)
 
   target <- if (down == 1) {
     0.4 * togo
@@ -86,22 +77,25 @@ play_value <- function(down, togo, gain,
     togo
   }
 
-  achievement <- gain / target
+  # A defensive accepted penalty can legally convert 3rd/4th down
+  # even though the 50%-weighted effective yardage is < togo.
+  gain_for_scoring <- gain
 
-  if (down %in% c(3,4) && gain < togo) {
+  if (isTRUE(force_conversion) &&
+      down %in% c(3, 4) &&
+      gain_for_scoring < togo) {
+    gain_for_scoring <- togo
+  }
 
+  achievement <- gain_for_scoring / target
+
+  if (down %in% c(3,4) &&
+      gain_for_scoring < togo) {
     value <- max(-1.5, achievement - 1)
-
   } else if (achievement <= 1) {
-
     value <- max(-1.5, achievement)
-
   } else {
-
-    value <- min(
-      1.75,
-      1 + 0.35 * log(achievement)
-    )
+    value <- min(1.75, 1 + 0.35 * log(achievement))
   }
 
   if (isTRUE(turnover)) value <- value - 1
@@ -109,17 +103,8 @@ play_value <- function(down, togo, gain,
   value
 }
 
-# ------------------------------------------------------------
-# 4. Identify required nflverse columns
-# ------------------------------------------------------------
-
 required <- c(
-  "game_id",
-  "week",
-  "posteam",
-  "down",
-  "ydstogo",
-  "yards_gained"
+  "game_id", "week", "posteam", "down", "ydstogo", "yards_gained"
 )
 
 missing_required <- setdiff(required, names(pbp))
@@ -131,94 +116,192 @@ if (length(missing_required)) {
   )
 }
 
-# ------------------------------------------------------------
-# 5. Build scoring-play dataset
-# ------------------------------------------------------------
-
 q <- pbp
 
 q$down_num <- as_num(q$down)
 q$togo_num <- as_num(q$ydstogo)
-q$gain_num <- as_num(q$yards_gained)
+q$football_gain <- as_num(q$yards_gained)
 
-# Exclude no-plays where available
+desc <- if ("desc" %in% names(q)) {
+  as.character(q$desc)
+} else {
+  rep("", nrow(q))
+}
+
+# ------------------------------------------------------------
+# PENALTY CLASSIFICATION
+# ------------------------------------------------------------
+
+penalty_flag <- rep(FALSE, nrow(q))
+if ("penalty" %in% names(q))
+  penalty_flag <- flag(q$penalty)
+
+penalty_flag <- penalty_flag | txt_has(desc, "PENALTY")
+
+penalty_yards <- rep(0, nrow(q))
+if ("penalty_yards" %in% names(q)) {
+  py <- as_num(q$penalty_yards)
+  py[!is.finite(py)] <- 0
+  penalty_yards <- abs(py)
+}
+
+penalty_team <- rep(NA_character_, nrow(q))
+if ("penalty_team" %in% names(q))
+  penalty_team <- as.character(q$penalty_team)
+
+declined <- txt_has(
+  desc,
+  "declined|offsetting|offset penalties|penalties offset"
+)
+
+dead_ball <- txt_has(
+  desc,
+  paste0(
+    "dead ball|between downs|after the play|after play|",
+    "enforced on (the )?kickoff|ensuing kickoff|",
+    "during the try|on the try|extra point|PAT"
+  )
+)
+
+# nflverse yards_gained is football yardage; penalty_yards is separate.
+# Therefore do NOT subtract penalty yards from yards_gained and add them
+# back. Start with football yards and add only the weighted consequence.
+
+live_accepted_penalty <-
+  penalty_flag &
+  !declined &
+  !dead_ball &
+  penalty_yards > 0
+
+offensive_penalty <-
+  live_accepted_penalty &
+  !is.na(penalty_team) &
+  penalty_team == q$posteam
+
+defensive_penalty <-
+  live_accepted_penalty &
+  !is.na(penalty_team) &
+  penalty_team != "" &
+  penalty_team != q$posteam
+
+# Fallback only for rows where nflverse identifies a live penalty but
+# penalty_team is missing. We retain the football play but do not invent
+# the direction of the penalty. These are written to the audit for review.
+unknown_penalty_side <-
+  live_accepted_penalty &
+  !(offensive_penalty | defensive_penalty)
+
+penalty_effect <- rep(0, nrow(q))
+penalty_effect[offensive_penalty] <-
+  -PENALTY_YARD_WEIGHT * penalty_yards[offensive_penalty]
+penalty_effect[defensive_penalty] <-
+   PENALTY_YARD_WEIGHT * penalty_yards[defensive_penalty]
+
+q$effective_gain <- q$football_gain + penalty_effect
+
+# ------------------------------------------------------------
+# NO-PLAY HANDLING
+# ------------------------------------------------------------
+
 no_play <- rep(FALSE, nrow(q))
-
-if ("no_play" %in% names(q)) {
+if ("no_play" %in% names(q))
   no_play <- flag(q$no_play)
-}
 
-if ("desc" %in% names(q)) {
-  no_play <- no_play |
-    grepl("No Play|NO PLAY", q$desc)
-}
+no_play <- no_play | txt_has(desc, "No Play|NO PLAY")
 
-# Exclude special-teams plays
+# IMPORTANT:
+# Do not throw away accepted live-possession penalty rows merely because
+# nflverse labels the snap "no_play". Those penalty consequences are part
+# of the Situation model. For a genuine no-play penalty there are no
+# football yards, so score only 50% of the enforced penalty yardage.
+accepted_penalty_no_play <-
+  no_play &
+  live_accepted_penalty &
+  (offensive_penalty | defensive_penalty)
+
+q$effective_gain[accepted_penalty_no_play] <-
+  penalty_effect[accepted_penalty_no_play]
+
+q$football_gain[accepted_penalty_no_play] <- 0
+
+# Declined/dead-ball no-play rows contribute nothing and remain excluded.
+exclude_no_play <- no_play & !accepted_penalty_no_play
+
+# ------------------------------------------------------------
+# SPECIAL TEAMS / KNEELS / TURNOVERS
+# ------------------------------------------------------------
+
 special <- rep(FALSE, nrow(q))
-
-if ("special_teams_play" %in% names(q)) {
+if ("special_teams_play" %in% names(q))
   special <- flag(q$special_teams_play)
-}
 
-# Kneels score zero
 kneel <- rep(FALSE, nrow(q))
-
-if ("qb_kneel" %in% names(q)) {
+if ("qb_kneel" %in% names(q))
   kneel <- flag(q$qb_kneel)
-}
+kneel <- kneel | txt_has(desc, "kneel|kneels")
 
-if ("desc" %in% names(q)) {
-  kneel <- kneel |
-    grepl("kneel|kneels", q$desc, ignore.case = TRUE)
-}
-
-# Interceptions
 interception <- rep(FALSE, nrow(q))
-
-if ("interception" %in% names(q)) {
+if ("interception" %in% names(q))
   interception <- flag(q$interception)
-}
-
 if ("interception_player_id" %in% names(q)) {
   interception <- interception |
     (!is.na(q$interception_player_id) &
        q$interception_player_id != "")
 }
 
-# Fumbles
-#
-# IMPORTANT:
-# Preserve the existing 2026 model:
-# ANY fumble gets the -1 event penalty,
-# whether recovered by offence or defence.
-
 fumble <- rep(FALSE, nrow(q))
-
-if ("fumble" %in% names(q)) {
+if ("fumble" %in% names(q))
   fumble <- flag(q$fumble)
-}
-
 if ("fumbled_1_player_id" %in% names(q)) {
   fumble <- fumble |
     (!is.na(q$fumbled_1_player_id) &
        q$fumbled_1_player_id != "")
 }
+fumble <- fumble | txt_has(desc, "FUMBLES|Fumble")
 
-if ("desc" %in% names(q)) {
-  fumble <- fumble |
-    grepl("FUMBLES|Fumble", q$desc, ignore.case = TRUE)
-}
-
-# Same interception treatment as live converter:
-# offensive gain reset to zero.
-
-q$gain_model <- q$gain_num
-q$gain_model[interception] <- 0
+# Interception: offensive gain is zero. Retain any legitimate live
+# defensive penalty consequence separately.
+q$effective_gain[interception] <- penalty_effect[interception]
+q$football_gain[interception] <- 0
 
 turnover_event <- interception | fumble
 
+# ------------------------------------------------------------
+# PRESERVE PENALTY FIRST-DOWN CONVERSIONS
+# ------------------------------------------------------------
+
+first_down_penalty <- rep(FALSE, nrow(q))
+if ("first_down_penalty" %in% names(q))
+  first_down_penalty <- flag(q$first_down_penalty)
+
+automatic_first_down <- txt_has(
+  desc,
+  "automatic first down"
+)
+
+force_conversion <-
+  defensive_penalty &
+  q$down_num %in% c(3, 4) &
+  (first_down_penalty | automatic_first_down)
+
+# A defensive penalty can also convert by distance without being described
+# as "automatic". If the full enforced penalty alone reaches the line to
+# gain, preserve the conversion even though we value those penalty yards
+# at only 50%.
+force_conversion <-
+  force_conversion |
+  (
+    defensive_penalty &
+    q$down_num %in% c(3, 4) &
+    penalty_yards >= q$togo_num
+  )
+
+# ------------------------------------------------------------
+# KEEP OFFENSIVE SITUATION EVENTS
+# ------------------------------------------------------------
+
 keep <- (
-  !no_play &
+  !exclude_no_play &
   !special &
   !is.na(q$posteam) &
   q$posteam != "" &
@@ -226,43 +309,82 @@ keep <- (
   q$down_num %in% 1:4 &
   !is.na(q$togo_num) &
   q$togo_num > 0 &
-  !is.na(q$gain_model)
+  !is.na(q$effective_gain)
 )
 
 q <- q[keep, ]
-
 kneel <- kneel[keep]
 turnover_event <- turnover_event[keep]
 interception <- interception[keep]
 fumble <- fumble[keep]
+penalty_flag <- penalty_flag[keep]
+penalty_yards <- penalty_yards[keep]
+penalty_team <- penalty_team[keep]
+declined <- declined[keep]
+dead_ball <- dead_ball[keep]
+live_accepted_penalty <- live_accepted_penalty[keep]
+offensive_penalty <- offensive_penalty[keep]
+defensive_penalty <- defensive_penalty[keep]
+unknown_penalty_side <- unknown_penalty_side[keep]
+penalty_effect <- penalty_effect[keep]
+force_conversion <- force_conversion[keep]
+accepted_penalty_no_play <- accepted_penalty_no_play[keep]
 
 cat("Scored offensive plays:", nrow(q), "\n")
+cat("Accepted live penalty plays:",
+    sum(live_accepted_penalty), "\n")
+cat("Accepted penalty no-plays retained:",
+    sum(accepted_penalty_no_play), "\n")
+cat("Penalty conversion overrides:",
+    sum(force_conversion), "\n")
+cat("Live penalties with unknown side:",
+    sum(unknown_penalty_side), "\n")
 
 # ------------------------------------------------------------
-# 6. Score every play
+# SCORE
 # ------------------------------------------------------------
 
 q$play_value <- mapply(
   play_value,
   q$down_num,
   q$togo_num,
-  q$gain_model,
+  q$effective_gain,
   turnover_event,
-  kneel
+  kneel,
+  force_conversion
 )
 
 q$turnover_event <- turnover_event
 q$interception_event <- interception
 q$fumble_event <- fumble
+q$penalty_event <- penalty_flag
+q$penalty_yards_model <- penalty_yards
+q$penalty_team_model <- penalty_team
+q$penalty_declined <- declined
+q$penalty_dead_ball <- dead_ball
+q$penalty_live_accepted <- live_accepted_penalty
+q$penalty_offense <- offensive_penalty
+q$penalty_defense <- defensive_penalty
+q$penalty_side_unknown <- unknown_penalty_side
+q$penalty_effective_yards <- penalty_effect
+q$penalty_conversion_override <- force_conversion
+q$penalty_no_play_retained <- accepted_penalty_no_play
 
 write.csv(
   q,
-  "calibration_2025/2025_scored_plays.csv",
+  "calibration_2025/2025_scored_plays_penalty_aware.csv",
+  row.names = FALSE
+)
+
+# Separate penalty audit: this is useful for checking the classification.
+write.csv(
+  q[q$penalty_event, ],
+  "calibration_2025/2025_penalty_audit.csv",
   row.names = FALSE
 )
 
 # ------------------------------------------------------------
-# 7. Team-game raw situational totals
+# TEAM-GAME RAW TOTALS
 # ------------------------------------------------------------
 
 raw <- aggregate(
@@ -271,7 +393,6 @@ raw <- aggregate(
   FUN = sum,
   na.rm = TRUE
 )
-
 names(raw)[names(raw) == "play_value"] <- "raw_situation"
 
 plays <- aggregate(
@@ -279,12 +400,10 @@ plays <- aggregate(
   data = q,
   FUN = length
 )
-
 names(plays)[names(plays) == "play_value"] <- "scored_plays"
 
 team_game <- merge(
-  raw,
-  plays,
+  raw, plays,
   by = c("game_id", "week", "posteam"),
   all = TRUE
 )
@@ -293,35 +412,22 @@ team_game$raw_per_play <-
   team_game$raw_situation / team_game$scored_plays
 
 # ------------------------------------------------------------
-# 8. Actual offensive points
+# ACTUAL POINTS
 # ------------------------------------------------------------
 
-# nflverse total_home_score / total_away_score are final
-# scoreboard totals repeated on the game rows.
-
 if (!all(c(
-  "home_team",
-  "away_team",
-  "total_home_score",
-  "total_away_score"
+  "home_team", "away_team",
+  "total_home_score", "total_away_score"
 ) %in% names(pbp))) {
-
   stop("Could not identify final score columns.")
 }
 
 games <- unique(
   pbp[, c(
-    "game_id",
-    "week",
-    "home_team",
-    "away_team",
-    "total_home_score",
-    "total_away_score"
+    "game_id", "week", "home_team", "away_team",
+    "total_home_score", "total_away_score"
   )]
 )
-
-# Some PBP versions can contain repeated score states.
-# Take the maximum/final score for each game.
 
 game_scores <- aggregate(
   cbind(total_home_score, total_away_score) ~
@@ -334,96 +440,33 @@ game_scores <- aggregate(
 actual_rows <- list()
 
 for (i in seq_len(nrow(game_scores))) {
-
   g <- game_scores[i, ]
 
-  actual_rows[[length(actual_rows) + 1]] <-
-    data.frame(
-      game_id = g$game_id,
-      week = g$week,
-      posteam = g$home_team,
-      actual_points = as.numeric(g$total_home_score)
-    )
+  actual_rows[[length(actual_rows) + 1]] <- data.frame(
+    game_id = g$game_id,
+    week = g$week,
+    posteam = g$home_team,
+    actual_points = as.numeric(g$total_home_score)
+  )
 
-  actual_rows[[length(actual_rows) + 1]] <-
-    data.frame(
-      game_id = g$game_id,
-      week = g$week,
-      posteam = g$away_team,
-      actual_points = as.numeric(g$total_away_score)
-    )
+  actual_rows[[length(actual_rows) + 1]] <- data.frame(
+    game_id = g$game_id,
+    week = g$week,
+    posteam = g$away_team,
+    actual_points = as.numeric(g$total_away_score)
+  )
 }
 
 actual <- do.call(rbind, actual_rows)
 
 team_game <- merge(
-  team_game,
-  actual,
+  team_game, actual,
   by = c("game_id", "week", "posteam"),
   all.x = TRUE
 )
 
 # ------------------------------------------------------------
-# 9. Net offensive yards
-# ------------------------------------------------------------
-
-# nflverse has drive/play yardage, but for this calibration
-# we do NOT want to quietly pretend summed play gains are
-# official net offensive yards.
-#
-# Use team game statistics if present in the PBP schema.
-# Otherwise the calibration can still run; yardage comparison
-# will be marked unavailable rather than fabricated.
-
-yard_candidates <- c(
-  "total_yards",
-  "net_yards",
-  "offense_yards",
-  "team_yards"
-)
-
-yard_col <- yard_candidates[
-  yard_candidates %in% names(pbp)
-]
-
-if (length(yard_col)) {
-
-  yc <- yard_col[1]
-
-  yard_data <- pbp[
-    !is.na(pbp$posteam) & pbp$posteam != "",
-    c("game_id", "week", "posteam", yc)
-  ]
-
-  names(yard_data)[4] <- "net_offensive_yards"
-
-  yard_data$net_offensive_yards <-
-    as_num(yard_data$net_offensive_yards)
-
-  yard_data <- aggregate(
-    net_offensive_yards ~ game_id + week + posteam,
-    data = yard_data,
-    FUN = max,
-    na.rm = TRUE
-  )
-
-  team_game <- merge(
-    team_game,
-    yard_data,
-    by = c("game_id", "week", "posteam"),
-    all.x = TRUE
-  )
-
-} else {
-
-  team_game$net_offensive_yards <- NA_real_
-}
-
-team_game$yardage_fair_points <-
-  team_game$net_offensive_yards / 14.5
-
-# ------------------------------------------------------------
-# 10. Basic quality checks
+# QUALITY CHECKS
 # ------------------------------------------------------------
 
 team_game <- team_game[
@@ -441,7 +484,7 @@ if (nrow(team_game) != 544) {
 }
 
 # ------------------------------------------------------------
-# 11. Descriptive statistics
+# RECALIBRATION
 # ------------------------------------------------------------
 
 raw_mean <- mean(team_game$raw_situation)
@@ -461,42 +504,17 @@ cor_raw_points <- cor(
   use = "complete.obs"
 )
 
-cor_raw_yards <- if (
-  any(is.finite(team_game$net_offensive_yards))
-) {
-  cor(
-    team_game$raw_situation,
-    team_game$net_offensive_yards,
-    use = "complete.obs"
-  )
-} else {
-  NA_real_
-}
-
-# ------------------------------------------------------------
-# 12. Candidate A — simple multiplier
-# ------------------------------------------------------------
-
+# Candidate A: preserve the shape of the Situation model and rescale it.
 multiplier_mean <- points_mean / raw_mean
 
-team_game$situ_points_multiplier <-
-  team_game$raw_situation * multiplier_mean
-
-# Least-squares multiplier constrained through zero.
 fit_zero <- lm(
   actual_points ~ 0 + raw_situation,
   data = team_game
 )
-
 multiplier_ls <- unname(coef(fit_zero)[1])
 
-team_game$situ_points_zero_reg <-
-  team_game$raw_situation * multiplier_ls
-
-# ------------------------------------------------------------
-# 13. Candidate B — regression with intercept
-# ------------------------------------------------------------
-
+# For comparison only. We are not automatically changing the model to an
+# intercept regression.
 fit_intercept <- lm(
   actual_points ~ raw_situation,
   data = team_game
@@ -505,32 +523,21 @@ fit_intercept <- lm(
 intercept_a <- unname(coef(fit_intercept)[1])
 slope_b <- unname(coef(fit_intercept)[2])
 
-team_game$situ_points_regression <-
-  predict(fit_intercept, newdata = team_game)
-
-# ------------------------------------------------------------
-# 14. Candidate C — account for play volume
-# ------------------------------------------------------------
-
 fit_volume <- lm(
   actual_points ~ raw_situation + scored_plays,
   data = team_game
 )
 
-team_game$situ_points_volume <-
-  predict(fit_volume, newdata = team_game)
-
-# ------------------------------------------------------------
-# 15. Out-of-sample test
-#
-# Fit Weeks 1-12
-# Test Weeks 13-18
-# ------------------------------------------------------------
-
+# OOS comparison: fit Weeks 1-12, test Weeks 13-18.
 train <- team_game[team_game$week <= 12, ]
 test  <- team_game[team_game$week >= 13, ]
 
-fit_oos_raw <- lm(
+fit_oos_mean_zero <- lm(
+  actual_points ~ 0 + raw_situation,
+  data = train
+)
+
+fit_oos_intercept <- lm(
   actual_points ~ raw_situation,
   data = train
 )
@@ -540,11 +547,9 @@ fit_oos_volume <- lm(
   data = train
 )
 
-test$pred_raw <-
-  predict(fit_oos_raw, newdata = test)
-
-test$pred_volume <-
-  predict(fit_oos_volume, newdata = test)
+test$pred_zero <- predict(fit_oos_mean_zero, newdata = test)
+test$pred_intercept <- predict(fit_oos_intercept, newdata = test)
+test$pred_volume <- predict(fit_oos_volume, newdata = test)
 
 rmse <- function(actual, predicted) {
   sqrt(mean((actual - predicted)^2, na.rm = TRUE))
@@ -554,88 +559,23 @@ mae <- function(actual, predicted) {
   mean(abs(actual - predicted), na.rm = TRUE)
 }
 
-oos_raw_rmse <- rmse(
-  test$actual_points,
-  test$pred_raw
-)
-
-oos_raw_mae <- mae(
-  test$actual_points,
-  test$pred_raw
-)
-
-oos_volume_rmse <- rmse(
-  test$actual_points,
-  test$pred_volume
-)
-
-oos_volume_mae <- mae(
-  test$actual_points,
-  test$pred_volume
-)
-
-# ------------------------------------------------------------
-# 16. Detroit-Buffalo 2026 illustration
-# ------------------------------------------------------------
-
-DET_RAW <- 30.3
-BUF_RAW <- 53.6
-
-det_mean_mult <- DET_RAW * multiplier_mean
-buf_mean_mult <- BUF_RAW * multiplier_mean
-
-det_zero_reg <- DET_RAW * multiplier_ls
-buf_zero_reg <- BUF_RAW * multiplier_ls
-
-det_reg <- intercept_a + slope_b * DET_RAW
-buf_reg <- intercept_a + slope_b * BUF_RAW
-
-# Current known game components
-DET_ACTUAL <- 31
-BUF_ACTUAL <- 41
-
-DET_YARD <- 355 / 14.5
-BUF_YARD <- 446 / 14.5
-
-det_fair_reg <-
-  .30 * DET_ACTUAL +
-  .30 * DET_YARD +
-  .40 * det_reg
-
-buf_fair_reg <-
-  .30 * BUF_ACTUAL +
-  .30 * BUF_YARD +
-  .40 * buf_reg
-
-# ------------------------------------------------------------
-# 17. Output files
-# ------------------------------------------------------------
-
-write.csv(
-  team_game,
-  "calibration_2025/team_game_calibration.csv",
-  row.names = FALSE
-)
-
-write.csv(
-  test,
-  "calibration_2025/out_of_sample_weeks13_18.csv",
-  row.names = FALSE
-)
-
 summary_lines <- c(
-
-  "NFL NUMBERS — 2025 SITUATIONAL CALIBRATION",
-  "==========================================",
+  "NFL NUMBERS — 2025 PENALTY-AWARE SITUATIONAL CALIBRATION",
+  "========================================================",
   "",
-
   paste("Regular-season team-games:", nrow(team_game)),
+  paste("Penalty-yard weight:", PENALTY_YARD_WEIGHT),
   "",
-
+  "PENALTY AUDIT",
+  paste("Accepted live penalty plays:", sum(q$penalty_live_accepted)),
+  paste("Accepted penalty no-plays retained:", sum(q$penalty_no_play_retained)),
+  paste("Penalty conversion overrides:", sum(q$penalty_conversion_override)),
+  paste("Live penalties with unknown side:", sum(q$penalty_side_unknown)),
+  "",
   "RAW SITUATIONAL DISTRIBUTION",
-  paste("Mean:", round(raw_mean, 4)),
-  paste("Median:", round(raw_median, 4)),
-  paste("SD:", round(raw_sd, 4)),
+  paste("Mean:", round(raw_mean, 6)),
+  paste("Median:", round(raw_median, 6)),
+  paste("SD:", round(raw_sd, 6)),
   paste(
     "Quantiles:",
     paste(
@@ -644,31 +584,23 @@ summary_lines <- c(
       collapse = " | "
     )
   ),
-  "",
-
-  "RELATIONSHIPS",
+  paste("Mean actual points:", round(points_mean, 6)),
   paste(
     "Correlation raw situation vs actual points:",
-    round(cor_raw_points, 4)
-  ),
-  paste(
-    "Correlation raw situation vs net offensive yards:",
-    round(cor_raw_yards, 4)
+    round(cor_raw_points, 6)
   ),
   "",
-
-  "SCALE-ONLY CALIBRATION",
+  "SCALE-ONLY CANDIDATES",
   paste(
     "Mean-matching multiplier:",
-    round(multiplier_mean, 6)
+    sprintf("%.8f", multiplier_mean)
   ),
   paste(
     "Least-squares zero-intercept multiplier:",
-    round(multiplier_ls, 6)
+    sprintf("%.8f", multiplier_ls)
   ),
   "",
-
-  "REGRESSION WITH INTERCEPT",
+  "INTERCEPT REGRESSION — COMPARISON ONLY",
   paste(
     "Situational points =",
     round(intercept_a, 6),
@@ -677,66 +609,55 @@ summary_lines <- c(
     "x raw situation"
   ),
   "",
-
-  "VOLUME MODEL",
+  "OUT-OF-SAMPLE WEEKS 13-18",
   paste(
-    capture.output(coef(fit_volume)),
-    collapse = " "
+    "Zero-intercept RMSE:",
+    round(rmse(test$actual_points, test$pred_zero), 6)
+  ),
+  paste(
+    "Zero-intercept MAE:",
+    round(mae(test$actual_points, test$pred_zero), 6)
+  ),
+  paste(
+    "Intercept regression RMSE:",
+    round(rmse(test$actual_points, test$pred_intercept), 6)
+  ),
+  paste(
+    "Intercept regression MAE:",
+    round(mae(test$actual_points, test$pred_intercept), 6)
+  ),
+  paste(
+    "Raw + play-volume RMSE:",
+    round(rmse(test$actual_points, test$pred_volume), 6)
+  ),
+  paste(
+    "Raw + play-volume MAE:",
+    round(mae(test$actual_points, test$pred_volume), 6)
   ),
   "",
+  "IMPORTANT",
+  "Do not automatically adopt the intercept/volume model.",
+  "The scale-only candidates preserve the established Situation metric shape.",
+  "Review the penalty audit and calibration results before selecting the new multiplier."
+)
 
-  "OUT-OF-SAMPLE — WEEKS 13-18",
-  paste(
-    "Raw regression RMSE:",
-    round(oos_raw_rmse, 4)
-  ),
-  paste(
-    "Raw regression MAE:",
-    round(oos_raw_mae, 4)
-  ),
-  paste(
-    "Raw + play volume RMSE:",
-    round(oos_volume_rmse, 4)
-  ),
-  paste(
-    "Raw + play volume MAE:",
-    round(oos_volume_mae, 4)
-  ),
-  "",
+write.csv(
+  team_game,
+  "calibration_2025/team_game_calibration_penalty_aware.csv",
+  row.names = FALSE
+)
 
-  "DETROIT-BUFFALO ILLUSTRATION",
-  paste(
-    "Mean multiplier DET / BUF:",
-    round(det_mean_mult, 2),
-    "/",
-    round(buf_mean_mult, 2)
-  ),
-  paste(
-    "Zero-regression DET / BUF:",
-    round(det_zero_reg, 2),
-    "/",
-    round(buf_zero_reg, 2)
-  ),
-  paste(
-    "Intercept regression DET / BUF:",
-    round(det_reg, 2),
-    "/",
-    round(buf_reg, 2)
-  ),
-  paste(
-    "30/30/40 fair score using intercept regression:",
-    "DET",
-    round(det_fair_reg, 2),
-    "BUF",
-    round(buf_fair_reg, 2)
-  )
+write.csv(
+  test,
+  "calibration_2025/out_of_sample_weeks13_18_penalty_aware.csv",
+  row.names = FALSE
 )
 
 writeLines(
   summary_lines,
-  "calibration_2025/calibration_summary.txt"
+  "calibration_2025/calibration_summary_penalty_aware.txt"
 )
 
 cat("\n")
 cat(paste(summary_lines, collapse = "\n"))
-cat("\n\nSUCCESS — 2025 calibration complete.\n")
+cat("\n\nSUCCESS — penalty-aware 2025 calibration complete.\n")
