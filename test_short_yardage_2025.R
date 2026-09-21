@@ -148,7 +148,7 @@ score_row <- function(d,t,g,turn,kneel,variant) {
   excess_value(d,t,g,denom,turn,kneel)
 }
 
-variants <- c("current","excess_3","excess_4","excess_5")
+variants <- c("current","excess_4","excess_5","excess_6","excess_7","excess_8")
 
 for (v in variants) {
   vals <- mapply(
@@ -351,9 +351,11 @@ breakdown <- breakdown_source |>
     conversions=sum(effective_gain >= ydstogo | defensive_conversion, na.rm=TRUE),
     penalty_only_conversions=sum(penalty_only_conversion, na.rm=TRUE),
     current=mean(value_current,na.rm=TRUE),
-    excess_3=mean(value_excess_3,na.rm=TRUE),
     excess_4=mean(value_excess_4,na.rm=TRUE),
     excess_5=mean(value_excess_5,na.rm=TRUE),
+    excess_6=mean(value_excess_6,na.rm=TRUE),
+    excess_7=mean(value_excess_7,na.rm=TRUE),
+    excess_8=mean(value_excess_8,na.rm=TRUE),
     .groups="drop"
   )
 
@@ -364,7 +366,7 @@ write.csv(breakdown, "short_yardage_play_breakdown.csv", row.names=FALSE)
 notes <- c(
   "NFL Numbers 2025 short-yardage Situation test",
   "",
-  "Variants: current, excess_3, excess_4, excess_5.",
+  "Variants: current, excess_4, excess_5, excess_6, excess_7, excess_8.",
   "Penalty-only defensive 3rd/4th conversions are fixed at +1.00.",
   "Accepted live penalty yards weighted at 50%.",
   "Each variant is recalibrated on the opposite week parity.",
