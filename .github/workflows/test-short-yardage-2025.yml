@@ -25,11 +25,16 @@ jobs:
         run: Rscript test_short_yardage_2025.R
 
       - name: Upload results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: short-yardage-2025-test
+          if-no-files-found: warn
           path: |
             short_yardage_model_comparison.csv
             short_yardage_fold_results.csv
             short_yardage_play_breakdown.csv
             short_yardage_test_notes.txt
+            short_yardage_sequential_game_predictions.csv
+            short_yardage_sequential_summary.csv
+            short_yardage_sequential_windows.csv
