@@ -238,7 +238,11 @@ for (v in variants) {
     train <- tg[tg$parity == train_parity,]
     test  <- tg[tg$parity == test_parity,]
 
-    fit <- lm(actual_points ~ train[[rawcol]])
+    fit_data <- data.frame(
+      actual_points = train$actual_points,
+      raw_situation = train[[rawcol]]
+    )
+    fit <- lm(actual_points ~ raw_situation, data = fit_data)
     b0 <- unname(coef(fit)[1])
     b1 <- unname(coef(fit)[2])
 
