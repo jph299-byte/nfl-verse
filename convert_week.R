@@ -1,7 +1,7 @@
 options(stringsAsFactors = FALSE)
 
 # ============================================================
-# NFL NUMBERS — AUTOMATIC WEEKLY SITUATIONAL FAIR-SCORE ENGINE
+# NFL NUMBERS — WEEKLY SITUATIONAL FAIR-SCORE ENGINE
 # ============================================================
 #
 # Usage:
@@ -10,7 +10,7 @@ options(stringsAsFactors = FALSE)
 #   Rscript convert_week.R auto
 #   Rscript convert_week.R 2
 #
-# MODEL — DO NOT CHANGE WITHOUT INTENTIONAL RECALIBRATION
+# LOCKED MODEL
 #
 # Target:
 #   1st down = 40% of yards-to-go
@@ -29,19 +29,28 @@ options(stringsAsFactors = FALSE)
 # Turnover/fumble event penalty = -1.0
 # Kneel = 0
 #
-# Yardage fair points:
-#   official net offensive yards / 14.5
+# LOCKED SITUATIONAL CALIBRATION:
 #
-# Situational fair points:
-#   game yardage-fair-point pool distributed according to
-#   each team's share of raw situational value
+#   Situational Fair Score =
+#       Raw Situational Total * 0.80475
 #
-# Overall fair score:
-#   30% actual + 30% yardage + 40% situational
+# IMPORTANT:
+#
+#   Yardage is NOT used to scale the Situation component.
+#
+#   Official net offensive yardage is deliberately handled
+#   separately from this PBP engine.
+#
+#   Final fair score is calculated downstream as:
+#
+#       30% Actual
+#     + 30% Yardage
+#     + 40% Calibrated Situation
 #
 # ============================================================
 
 SEASON <- 2026
+SITUATION_MULTIPLIER <- 0.80475
 
 BASE_URL <- paste0(
   "https://github.com/nflverse/nflverse-pbp/releases/download/raw_pbp_",
@@ -66,24 +75,37 @@ if (is.na(requested_week) || requested_week == "")
 as_num <- function(x) suppressWarnings(as.numeric(x))
 
 as_flag <- function(x) {
+
   if (is.logical(x))
     return(!is.na(x) & x)
 
-  tolower(as.character(x)) %in% c("true", "1", "yes")
+  tolower(as.character(x)) %in% c(
+    "true",
+    "1",
+    "yes"
+  )
 }
 
-pick_col <- function(df, candidates, required = TRUE) {
+pick_col <- function(
+  df,
+  candidates,
+  required = TRUE
+) {
 
-  hit <- candidates[candidates %in% names(df)]
+  hit <- candidates[
+    candidates %in% names(df)
+  ]
 
   if (length(hit))
     return(hit[1])
 
-  if (required)
+  if (required) {
+
     stop(
       "Missing expected column. Tried: ",
       paste(candidates, collapse = ", ")
     )
+  }
 
   NA_character_
 }
@@ -122,22 +144,36 @@ play_value <- function(
 
   target <-
     if (down == 1) {
+
       0.4 * togo
+
     } else if (down == 2) {
+
       0.6 * togo
+
     } else {
+
       togo
     }
 
   r <- gain / target
 
-  if (down %in% c(3, 4) && gain < togo) {
+  if (
+    down %in% c(3, 4) &&
+    gain < togo
+  ) {
 
-    v <- max(-1.5, r - 1)
+    v <- max(
+      -1.5,
+      r - 1
+    )
 
   } else if (r <= 1) {
 
-    v <- max(-1.5, r)
+    v <- max(
+      -1.5,
+      r
+    )
 
   } else {
 
@@ -170,9 +206,15 @@ final_ruling <- function(txt) {
 
   if (loc[1] != -1) {
 
-    last <- tail(loc, 1)
+    last <- tail(
+      loc,
+      1
+    )
 
-    ml <- attr(loc, "match.length")
+    ml <- attr(
+      loc,
+      "match.length"
+    )
 
     return(
       substr(
@@ -187,59 +229,19 @@ final_ruling <- function(txt) {
 }
 
 # ============================================================
-# DISCOVER AVAILABLE WEEK
+# RELEASE MANIFEST
 # ============================================================
 
-game_file_exists <- function(week, game) {
-
-  fn <- sprintf(
-    "%d_%02d_%s.rds",
-    SEASON,
-    week,
-    game
-  )
-
-  url <- paste0(BASE_URL, "/", fn)
-
-  tf <- tempfile(fileext = ".rds")
-
-  ok <- tryCatch({
-
-    suppressWarnings(
-      download.file(
-        url,
-        tf,
-        mode = "wb",
-        quiet = TRUE
-      )
-    )
-
-    file.exists(tf) &&
-      file.info(tf)$size > 1000
-
-  }, error = function(e) FALSE)
-
-  unlink(tf)
-
-  ok
-}
-
-# We only use this probe to establish whether a week exists.
-# The actual game list is discovered separately below.
-
-find_latest_week <- function() {
-
-  cat("Finding latest available nflverse week...\n")
-
-  # A known Thursday/Sunday game cannot safely be assumed each week,
-  # so week discovery is performed through the release manifest below.
+get_release_text <- function() {
 
   release_url <- paste0(
     "https://api.github.com/repos/nflverse/nflverse-pbp/releases/tags/raw_pbp_",
     SEASON
   )
 
-  tmp <- tempfile(fileext = ".json")
+  tmp <- tempfile(
+    fileext = ".json"
+  )
 
   download.file(
     release_url,
@@ -248,14 +250,29 @@ find_latest_week <- function() {
   )
 
   txt <- paste(
-    readLines(tmp, warn = FALSE),
+    readLines(
+      tmp,
+      warn = FALSE
+    ),
     collapse = "\n"
   )
 
   unlink(tmp)
 
-  # Extract filenames such as:
-  # 2026_02_DET_BUF.rds
+  txt
+}
+
+# ============================================================
+# DISCOVER LATEST AVAILABLE WEEK
+# ============================================================
+
+find_latest_week <- function() {
+
+  cat(
+    "Finding latest available nflverse week...\n"
+  )
+
+  txt <- get_release_text()
 
   pattern <- paste0(
     SEASON,
@@ -268,23 +285,44 @@ find_latest_week <- function() {
     perl = TRUE
   )
 
-  files <- regmatches(txt, hits)[[1]]
+  files <- regmatches(
+    txt,
+    hits
+  )[[1]]
 
-  if (!length(files))
-    stop("Could not discover any ", SEASON, " nflverse game files.")
+  if (
+    !length(files) ||
+    identical(files, character(0))
+  ) {
+
+    stop(
+      "Could not discover any ",
+      SEASON,
+      " nflverse game files."
+    )
+  }
 
   weeks <- as.integer(
     sub(
-      paste0("^", SEASON, "_([0-9]{2})_.*$"),
+      paste0(
+        "^",
+        SEASON,
+        "_([0-9]{2})_.*$"
+      ),
       "\\1",
       files
     )
   )
 
-  max(weeks, na.rm = TRUE)
+  max(
+    weeks,
+    na.rm = TRUE
+  )
 }
 
-if (tolower(requested_week) == "auto") {
+if (
+  tolower(requested_week) == "auto"
+) {
 
   WEEK <- find_latest_week()
 
@@ -298,13 +336,34 @@ if (tolower(requested_week) == "auto") {
     is.na(WEEK) ||
     WEEK < 1 ||
     WEEK > 22
-  )
-    stop("Invalid week: ", requested_week)
+  ) {
+
+    stop(
+      "Invalid week: ",
+      requested_week
+    )
+  }
 }
 
 cat("\n========================================\n")
-cat("NFL Numbers — Season ", SEASON, "\n", sep = "")
-cat("Processing Week ", WEEK, "\n", sep = "")
+cat(
+  "NFL Numbers — Season ",
+  SEASON,
+  "\n",
+  sep = ""
+)
+cat(
+  "Processing Week ",
+  WEEK,
+  "\n",
+  sep = ""
+)
+cat(
+  "Situation multiplier: ",
+  SITUATION_MULTIPLIER,
+  "\n",
+  sep = ""
+)
 cat("========================================\n\n")
 
 writeLines(
@@ -318,25 +377,7 @@ writeLines(
 
 discover_games <- function(week) {
 
-  release_url <- paste0(
-    "https://api.github.com/repos/nflverse/nflverse-pbp/releases/tags/raw_pbp_",
-    SEASON
-  )
-
-  tmp <- tempfile(fileext = ".json")
-
-  download.file(
-    release_url,
-    tmp,
-    quiet = TRUE
-  )
-
-  txt <- paste(
-    readLines(tmp, warn = FALSE),
-    collapse = "\n"
-  )
-
-  unlink(tmp)
+  txt <- get_release_text()
 
   prefix <- sprintf(
     "%d_%02d_",
@@ -356,17 +397,28 @@ discover_games <- function(week) {
   )
 
   files <- unique(
-    regmatches(txt, hits)[[1]]
+    regmatches(
+      txt,
+      hits
+    )[[1]]
   )
 
-  if (!length(files))
+  if (
+    !length(files) ||
+    identical(files, character(0))
+  ) {
+
     stop(
       "No nflverse game files available for Week ",
       week
     )
+  }
 
   games <- sub(
-    paste0("^", prefix),
+    paste0(
+      "^",
+      prefix
+    ),
     "",
     files
   )
@@ -377,7 +429,9 @@ discover_games <- function(week) {
     games
   )
 
-  sort(unique(games))
+  sort(
+    unique(games)
+  )
 }
 
 GAMES <- discover_games(WEEK)
@@ -385,11 +439,15 @@ GAMES <- discover_games(WEEK)
 cat(
   "Games currently available: ",
   length(GAMES),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 cat(
-  paste(GAMES, collapse = ", "),
+  paste(
+    GAMES,
+    collapse = ", "
+  ),
   "\n\n"
 )
 
@@ -399,7 +457,10 @@ cat(
 
 week_dir <- file.path(
   "output",
-  sprintf("week%02d", WEEK)
+  sprintf(
+    "week%02d",
+    WEEK
+  )
 )
 
 rds_dir <- file.path(
@@ -435,14 +496,12 @@ dir.create(
   showWarnings = FALSE
 )
 
-# Compatibility folder for the existing workflow/app.
+# Compatibility folder for workflow artifact.
+
 dir.create(
   "csv",
   showWarnings = FALSE
 )
-
-# Clear compatibility CSV folder so another week's
-# play files cannot leak into this week's artifact.
 
 old_csv <- list.files(
   "csv",
@@ -496,80 +555,25 @@ download_game <- function(g) {
   if (
     !file.exists(dest) ||
     file.info(dest)$size == 0
-  )
-    stop("Bad download: ", g)
+  ) {
 
-  dest
-}
-
-# ============================================================
-# OFFICIAL NET OFFENSIVE YARDS
-# ============================================================
-
-get_team_yards <- function(gd, team, plays) {
-
-  # First try game/team statistical fields if nflverse supplies them.
-  #
-  # We deliberately only accept fields that clearly describe
-  # total/net offensive yards.
-
-  candidates <- c(
-    "totalYards",
-    "totalNetYards",
-    "netYards",
-    "netOffensiveYards",
-    "yards"
-  )
-
-  objects <- list(
-    gd$visitorTeam,
-    gd$homeTeam
-  )
-
-  for (obj in objects) {
-
-    if (is.null(obj))
-      next
-
-    abbr <- NULL
-
-    if (!is.null(obj$abbreviation))
-      abbr <- as.character(obj$abbreviation)
-
-    if (
-      is.null(abbr) ||
-      abbr != team
+    stop(
+      "Bad download: ",
+      g
     )
-      next
-
-    for (nm in candidates) {
-
-      if (!is.null(obj[[nm]])) {
-
-        x <- as_num(obj[[nm]])
-
-        if (
-          length(x) &&
-          is.finite(x[1]) &&
-          x[1] >= 0
-        )
-          return(x[1])
-      }
-    }
   }
 
-  # Do NOT silently reconstruct official yardage from our scored
-  # play subset. Sacks, penalties and other NFL statistical rules
-  # can make that differ from official net offense.
-
-  NA_real_
+  dest
 }
 
 # ============================================================
 # EXTRACT + SCORE GAME
 # ============================================================
 
-extract_game <- function(path, g) {
+extract_game <- function(
+  path,
+  g
+) {
 
   x <- readRDS(path)
 
@@ -579,11 +583,13 @@ extract_game <- function(path, g) {
     is.null(gd) ||
     is.null(gd$plays) ||
     !is.data.frame(gd$plays)
-  )
+  ) {
+
     stop(
       "Could not find gameDetail$plays for ",
       g
     )
+  }
 
   p <- gd$plays
 
@@ -655,8 +661,6 @@ extract_game <- function(path, g) {
     FALSE
   )
 
-  # Additional audit fields.
-
   drive_col <- pick_col(
     p,
     c(
@@ -720,21 +724,36 @@ extract_game <- function(path, g) {
 
   desc <-
     if (!is.na(desc_col))
-      as.character(p[[desc_col]])
+      as.character(
+        p[[desc_col]]
+      )
     else
-      rep("", nrow(p))
+      rep(
+        "",
+        nrow(p)
+      )
 
   deleted <-
     if (!is.na(deleted_col))
-      as_flag(p[[deleted_col]])
+      as_flag(
+        p[[deleted_col]]
+      )
     else
-      rep(FALSE, nrow(p))
+      rep(
+        FALSE,
+        nrow(p)
+      )
 
   special <-
     if (!is.na(st_col))
-      as_flag(p[[st_col]])
+      as_flag(
+        p[[st_col]]
+      )
     else
-      rep(FALSE, nrow(p))
+      rep(
+        FALSE,
+        nrow(p)
+      )
 
   # ----------------------------------------------------------
   # KEEP OFFENSIVE SCRIMMAGE PLAYS
@@ -756,7 +775,9 @@ extract_game <- function(path, g) {
     desc
   )
 
-  keep <- keep & !no_play_text
+  keep <-
+    keep &
+    !no_play_text
 
   # ----------------------------------------------------------
   # AUDIT TABLE
@@ -774,25 +795,35 @@ extract_game <- function(path, g) {
 
   q$play_id <-
     if (!is.na(play_id_col))
-      as.character(p[[play_id_col]][keep])
+      as.character(
+        p[[play_id_col]][keep]
+      )
     else
-      as.character(q$source_row)
+      as.character(
+        q$source_row
+      )
 
   q$drive <-
     if (!is.na(drive_col))
-      as.character(p[[drive_col]][keep])
+      as.character(
+        p[[drive_col]][keep]
+      )
     else
       NA_character_
 
   q$quarter <-
     if (!is.na(quarter_col))
-      as.character(p[[quarter_col]][keep])
+      as.character(
+        p[[quarter_col]][keep]
+      )
     else
       NA_character_
 
   q$clock <-
     if (!is.na(clock_col))
-      as.character(p[[clock_col]][keep])
+      as.character(
+        p[[clock_col]][keep]
+      )
     else
       NA_character_
 
@@ -818,21 +849,26 @@ extract_game <- function(path, g) {
     ignore.case = TRUE
   )
 
-  # Interceptions:
-  # defensive return yards do not count toward offensive situation.
+  # Defensive interception return yards do not count
+  # toward offensive Situation.
 
-  q$gain[q$interception] <- 0
+  q$gain[
+    q$interception
+  ] <- 0
 
   q$gain_source <- "raw"
 
-  q$gain_source[q$interception] <-
-    "interception=0"
+  q$gain_source[
+    q$interception
+  ] <- "interception=0"
 
   # ----------------------------------------------------------
   # FUMBLE GAIN RECONSTRUCTION
   # ----------------------------------------------------------
 
-  event_idx <- which(q$fumble)
+  event_idx <- which(
+    q$fumble
+  )
 
   for (i in event_idx) {
 
@@ -862,7 +898,10 @@ extract_game <- function(path, g) {
       hits[1] != "-1"
     ) {
 
-      h <- tail(hits, 1)
+      h <- tail(
+        hits,
+        1
+      )
 
       if (
         grepl(
@@ -936,7 +975,8 @@ extract_game <- function(path, g) {
   )
 
   q$achievement <-
-    q$gain / q$target
+    q$gain /
+    q$target
 
   q$play_value <- mapply(
     play_value,
@@ -968,92 +1008,54 @@ extract_game <- function(path, g) {
   )
 
   if (
-    !is.finite(actual_away) ||
-    !is.finite(actual_home)
-  )
+    !length(actual_away) ||
+    !length(actual_home) ||
+    !is.finite(actual_away[1]) ||
+    !is.finite(actual_home[1])
+  ) {
+
     stop(
       "Game does not appear complete: ",
       g
     )
-
-  av <- sum(
-    q$play_value[q$team == away],
-    na.rm = TRUE
-  )
-
-  hv <- sum(
-    q$play_value[q$team == home],
-    na.rm = TRUE
-  )
-
-  ap <- sum(q$team == away)
-
-  hp <- sum(q$team == home)
-
-  # ----------------------------------------------------------
-  # OFFICIAL YARDAGE
-  # ----------------------------------------------------------
-
-  away_yards <- get_team_yards(
-    gd,
-    away,
-    p
-  )
-
-  home_yards <- get_team_yards(
-    gd,
-    home,
-    p
-  )
-
-  if (
-    !is.finite(away_yards) ||
-    !is.finite(home_yards)
-  ) {
-
-    stop(
-      "\nOfficial net offensive yardage could not be identified for ",
-      g,
-      ".\n",
-      "NFL Numbers deliberately stops here rather than using ",
-      "an unverified yardage reconstruction.\n"
-    )
   }
 
-  yard_away <-
-    away_yards / 14.5
+  actual_away <- actual_away[1]
+  actual_home <- actual_home[1]
 
-  yard_home <-
-    home_yards / 14.5
-
-  pool <-
-    yard_away +
-    yard_home
-
-  if (
-    !is.finite(av + hv) ||
-    av + hv <= 0
+  raw_away <- sum(
+    q$play_value[
+      q$team == away
+    ],
+    na.rm = TRUE
   )
-    stop(
-      "Invalid situation-value pool for ",
-      g
-    )
+
+  raw_home <- sum(
+    q$play_value[
+      q$team == home
+    ],
+    na.rm = TRUE
+  )
+
+  away_plays <- sum(
+    q$team == away
+  )
+
+  home_plays <- sum(
+    q$team == home
+  )
+
+  # ----------------------------------------------------------
+  # LOCKED SITUATIONAL CALIBRATION
+  # ----------------------------------------------------------
 
   situ_away <-
-    pool * av / (av + hv)
+    raw_away *
+    SITUATION_MULTIPLIER
 
   situ_home <-
-    pool * hv / (av + hv)
-
-  overall_away <-
-    0.30 * actual_away +
-    0.30 * yard_away +
-    0.40 * situ_away
-
-  overall_home <-
-    0.30 * actual_home +
-    0.30 * yard_home +
-    0.40 * situ_home
+    raw_home *
+    SITUATION_MULTIPLIER
 
   # ----------------------------------------------------------
   # WRITE PLAY AUDIT
@@ -1061,7 +1063,10 @@ extract_game <- function(path, g) {
 
   play_file <- file.path(
     play_dir,
-    paste0(g, "_exact_plays.csv")
+    paste0(
+      g,
+      "_exact_plays.csv"
+    )
   )
 
   write.csv(
@@ -1070,13 +1075,14 @@ extract_game <- function(path, g) {
     row.names = FALSE
   )
 
-  # Existing compatibility location.
-
   write.csv(
     q,
     file.path(
       "csv",
-      paste0(g, "_exact_plays.csv")
+      paste0(
+        g,
+        "_exact_plays.csv"
+      )
     ),
     row.names = FALSE
   )
@@ -1110,14 +1116,24 @@ extract_game <- function(path, g) {
             quarter = d$quarter[1],
             start_clock = d$clock[1],
             plays = nrow(d),
+
             scored_play_yards = sum(
               d$gain,
               na.rm = TRUE
             ),
+
             raw_situational = sum(
               d$play_value,
               na.rm = TRUE
             ),
+
+            calibrated_situational =
+              sum(
+                d$play_value,
+                na.rm = TRUE
+              ) *
+              SITUATION_MULTIPLIER,
+
             stringsAsFactors = FALSE
           )
         }
@@ -1130,7 +1146,10 @@ extract_game <- function(path, g) {
       drives,
       file.path(
         drive_dir,
-        paste0(g, "_drives.csv")
+        paste0(
+          g,
+          "_drives.csv"
+        )
       ),
       row.names = FALSE
     )
@@ -1141,7 +1160,8 @@ extract_game <- function(path, g) {
   # ----------------------------------------------------------
 
   manual_n <- sum(
-    q$gain_source == "MANUAL CHECK"
+    q$gain_source ==
+      "MANUAL CHECK"
   )
 
   if (manual_n) {
@@ -1157,7 +1177,8 @@ extract_game <- function(path, g) {
 
     print(
       q[
-        q$gain_source == "MANUAL CHECK",
+        q$gain_source ==
+          "MANUAL CHECK",
         c(
           "team",
           "down",
@@ -1172,22 +1193,27 @@ extract_game <- function(path, g) {
   cat(
     sprintf(
       paste0(
-        "%-8s raw=%3d scored=%3d ",
+        "%-8s raw plays=%3d scored=%3d ",
         "(%s %d, %s %d) ",
-        "values %.3f / %.3f ",
-        "yards %.0f / %.0f\n"
+        "raw situation %.3f / %.3f ",
+        "calibrated %.3f / %.3f\n"
       ),
+
       g,
       nrow(p),
       nrow(q),
+
       away,
-      ap,
+      away_plays,
+
       home,
-      hp,
-      av,
-      hv,
-      away_yards,
-      home_yards
+      home_plays,
+
+      raw_away,
+      raw_home,
+
+      situ_away,
+      situ_home
     )
   )
 
@@ -1199,31 +1225,36 @@ extract_game <- function(path, g) {
     week = WEEK,
     game = g,
 
-    away = display_team(away),
-    home = display_team(home),
+    away = display_team(
+      away
+    ),
 
-    away_plays = ap,
-    home_plays = hp,
+    home = display_team(
+      home
+    ),
 
-    away_value = av,
-    home_value = hv,
+    away_plays = away_plays,
+    home_plays = home_plays,
 
-    actual_away = actual_away,
-    actual_home = actual_home,
-
-    official_yards_away = away_yards,
-    official_yards_home = home_yards,
-
-    yard_away = yard_away,
-    yard_home = yard_home,
+    raw_situ_away = raw_away,
+    raw_situ_home = raw_home,
 
     situ_away = situ_away,
     situ_home = situ_home,
 
-    overall_away = overall_away,
-    overall_home = overall_home,
+    actual_away = actual_away,
+    actual_home = actual_home,
 
-    quality = "A",
+    situation_multiplier =
+      SITUATION_MULTIPLIER,
+
+    quality = ifelse(
+      manual_n == 0,
+      "A",
+      "CHECK"
+    ),
+
+    manual_checks = manual_n,
 
     stringsAsFactors = FALSE
   )
@@ -1234,7 +1265,6 @@ extract_game <- function(path, g) {
 # ============================================================
 
 rows <- list()
-
 failed <- character()
 
 for (g in GAMES) {
@@ -1272,10 +1302,12 @@ for (g in GAMES) {
   })
 }
 
-if (!length(rows))
+if (!length(rows)) {
+
   stop(
     "No completed games were successfully processed."
   )
+}
 
 res <- do.call(
   rbind,
@@ -1288,62 +1320,52 @@ rownames(res) <- NULL
 # VALIDATION
 # ============================================================
 
-if (any(!is.finite(res$overall_away)))
-  stop("Non-finite away overall score.")
+if (
+  any(
+    !is.finite(
+      res$raw_situ_away
+    )
+  )
+)
+  stop(
+    "Non-finite away raw Situation."
+  )
 
-if (any(!is.finite(res$overall_home)))
-  stop("Non-finite home overall score.")
-
-# Situational totals MUST equal the game's yardage point pool.
-
-situ_check <-
-  res$situ_away +
-  res$situ_home
-
-yard_check <-
-  res$yard_away +
-  res$yard_home
+if (
+  any(
+    !is.finite(
+      res$raw_situ_home
+    )
+  )
+)
+  stop(
+    "Non-finite home raw Situation."
+  )
 
 if (
   any(
     abs(
-      situ_check -
-      yard_check
+      res$situ_away -
+      res$raw_situ_away *
+        SITUATION_MULTIPLIER
     ) > 1e-8
   )
 )
   stop(
-    "Situational pool reconciliation failed."
+    "Away Situation calibration failed."
   )
-
-# Overall must exactly reproduce 30/30/40.
-
-oa_check <-
-  0.30 * res$actual_away +
-  0.30 * res$yard_away +
-  0.40 * res$situ_away
-
-oh_check <-
-  0.30 * res$actual_home +
-  0.30 * res$yard_home +
-  0.40 * res$situ_home
 
 if (
   any(
     abs(
-      res$overall_away -
-      oa_check
-    ) > 1e-8
-  ) ||
-  any(
-    abs(
-      res$overall_home -
-      oh_check
+      res$situ_home -
+      res$raw_situ_home *
+        SITUATION_MULTIPLIER
     ) > 1e-8
   )
 )
   stop(
-    "30/30/40 validation failed."
+    "Home Situation calibration failed."
   )
 
 # ============================================================
@@ -1351,12 +1373,7 @@ if (
 # ============================================================
 
 results_file <- sprintf(
-  "week%d_exact_results.csv",
-  WEEK
-)
-
-js_file <- sprintf(
-  "week%d_results.js",
+  "week%d_situation_results.csv",
   WEEK
 )
 
@@ -1370,10 +1387,14 @@ write.csv(
   res,
   file.path(
     week_dir,
-    "games.csv"
+    "situation_results.csv"
   ),
   row.names = FALSE
 )
+
+# ------------------------------------------------------------
+# JAVASCRIPT OUTPUT
+# ------------------------------------------------------------
 
 js <- apply(
   res,
@@ -1384,26 +1405,36 @@ js <- apply(
       paste0(
         '  {away:"%s",home:"%s",',
         'actual:[%.3f,%.3f],',
-        'yard:[%.3f,%.3f],',
+        'rawSitu:[%.3f,%.3f],',
         'situ:[%.3f,%.3f],',
-        'overall:[%.3f,%.3f],',
-        'quality:"A"}'
+        'quality:"%s"}'
       ),
 
       z["away"],
       z["home"],
 
-      as.numeric(z["actual_away"]),
-      as.numeric(z["actual_home"]),
+      as.numeric(
+        z["actual_away"]
+      ),
+      as.numeric(
+        z["actual_home"]
+      ),
 
-      as.numeric(z["yard_away"]),
-      as.numeric(z["yard_home"]),
+      as.numeric(
+        z["raw_situ_away"]
+      ),
+      as.numeric(
+        z["raw_situ_home"]
+      ),
 
-      as.numeric(z["situ_away"]),
-      as.numeric(z["situ_home"]),
+      as.numeric(
+        z["situ_away"]
+      ),
+      as.numeric(
+        z["situ_home"]
+      ),
 
-      as.numeric(z["overall_away"]),
-      as.numeric(z["overall_home"])
+      z["quality"]
     )
   }
 )
@@ -1411,7 +1442,7 @@ js <- apply(
 js_name <- paste0(
   "WEEK",
   WEEK,
-  "_RESULTS"
+  "_SITUATION_RESULTS"
 )
 
 js_lines <- c(
@@ -1420,11 +1451,18 @@ js_lines <- c(
     js_name,
     " = ["
   ),
+
   paste(
     js,
     collapse = ",\n"
   ),
+
   "];"
+)
+
+js_file <- sprintf(
+  "week%d_situation_results.js",
+  WEEK
 )
 
 writeLines(
@@ -1436,7 +1474,7 @@ writeLines(
   js_lines,
   file.path(
     week_dir,
-    "results.js"
+    "situation_results.js"
   )
 )
 
@@ -1445,7 +1483,12 @@ writeLines(
 # ============================================================
 
 cat("\n========================================\n")
-cat("SUCCESS — NFL Numbers Week ", WEEK, "\n", sep = "")
+cat(
+  "SUCCESS — NFL Numbers Week ",
+  WEEK,
+  "\n",
+  sep = ""
+)
 cat("========================================\n")
 
 cat(
@@ -1455,15 +1498,27 @@ cat(
   sep = ""
 )
 
+cat(
+  "Situation calibration: raw × ",
+  SITUATION_MULTIPLIER,
+  "\n",
+  sep = ""
+)
+
 if (length(failed)) {
 
   cat(
     "Available games skipped: ",
-    paste(failed, collapse = ", "),
+    paste(
+      failed,
+      collapse = ", "
+    ),
     "\n",
     sep = ""
   )
 }
+
+cat("\n")
 
 print(
   res[
@@ -1472,14 +1527,23 @@ print(
       "game",
       "actual_away",
       "actual_home",
-      "official_yards_away",
-      "official_yards_home",
+      "raw_situ_away",
+      "raw_situ_home",
       "situ_away",
       "situ_home",
-      "overall_away",
-      "overall_home",
       "away_plays",
-      "home_plays"
+      "home_plays",
+      "quality",
+      "manual_checks"
     )
   ]
+)
+
+cat(
+  "\nFinal 30/30/40 fair scores are NOT calculated here.\n"
+)
+
+cat(
+  "Add verified official net offensive yardage separately ",
+  "before calculating the final fair score.\n"
 )
