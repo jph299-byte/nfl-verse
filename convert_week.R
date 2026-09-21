@@ -1467,7 +1467,564 @@ extract_game <- function(path, g) {
     q$penalty_side == "unknown"
   )
 
-  penalty_no_play_n <- sum(
+    penalty_no_play_n <- sum(
     q$penalty_accepted &
     grepl(
-      "No Play|NO PLAY
+      "No Play|NO PLAY",
+      q$description
+    )
+  )
+
+  conversion_override_n <- sum(
+    q$force_conversion
+  )
+
+  # ----------------------------------------------------------
+  # WRITE PLAY AUDIT
+  # ----------------------------------------------------------
+
+  play_file <- file.path(
+    play_dir,
+    paste0(
+      g,
+      "_exact_plays.csv"
+    )
+  )
+
+  write.csv(
+    q,
+    play_file,
+    row.names = FALSE
+  )
+
+  write.csv(
+    q,
+    file.path(
+      "csv",
+      paste0(
+        g,
+        "_exact_plays.csv"
+      )
+    ),
+    row.names = FALSE
+  )
+
+  # ----------------------------------------------------------
+  # DRIVE AUDIT
+  # ----------------------------------------------------------
+
+  if (!all(is.na(q$drive))) {
+
+    drive_key <- paste(
+      q$team,
+      q$drive,
+      sep = "_"
+    )
+
+    drive_split <- split(
+      q,
+      drive_key
+    )
+
+    drives <- do.call(
+      rbind,
+      lapply(
+        drive_split,
+        function(d) {
+
+          drive_raw <- sum(
+            d$play_value,
+            na.rm = TRUE
+          )
+
+          data.frame(
+            team = d$team[1],
+            drive = d$drive[1],
+            quarter = d$quarter[1],
+            start_clock = d$clock[1],
+            plays = nrow(d),
+
+            football_yards = sum(
+              d$football_gain,
+              na.rm = TRUE
+            ),
+
+            penalty_effect_yards = sum(
+              d$penalty_effect,
+              na.rm = TRUE
+            ),
+
+            effective_situation_yards = sum(
+              d$gain,
+              na.rm = TRUE
+            ),
+
+            raw_situational = drive_raw,
+
+            calibrated_situational =
+              SITUATION_INTERCEPT +
+              SITUATION_SLOPE * drive_raw,
+
+            stringsAsFactors = FALSE
+          )
+        }
+      )
+    )
+
+    rownames(drives) <- NULL
+
+    write.csv(
+      drives,
+      file.path(
+        drive_dir,
+        paste0(
+          g,
+          "_drives.csv"
+        )
+      ),
+      row.names = FALSE
+    )
+  }
+
+  # ----------------------------------------------------------
+  # WARNINGS
+  # ----------------------------------------------------------
+
+  if (manual_n) {
+
+    cat(
+      "MANUAL CHECK plays for ",
+      g,
+      ": ",
+      manual_n,
+      "\n",
+      sep = ""
+    )
+  }
+
+  if (unknown_penalty_n) {
+
+    cat(
+      "UNKNOWN LIVE PENALTY SIDE for ",
+      g,
+      ": ",
+      unknown_penalty_n,
+      "\n",
+      sep = ""
+    )
+  }
+
+  cat(
+    sprintf(
+      paste0(
+        "%-8s plays=%3d ",
+        "raw situation %.3f / %.3f ",
+        "situ %.3f / %.3f ",
+        "penalty no-plays=%d ",
+        "conversion overrides=%d ",
+        "unknown penalties=%d\n"
+      ),
+      g,
+      nrow(q),
+      raw_away,
+      raw_home,
+      situ_away,
+      situ_home,
+      penalty_no_play_n,
+      conversion_override_n,
+      unknown_penalty_n
+    )
+  )
+
+  # ----------------------------------------------------------
+  # GAME RESULT
+  # ----------------------------------------------------------
+
+  data.frame(
+    week = WEEK,
+    game = g,
+
+    away = display_team(away),
+    home = display_team(home),
+
+    away_plays = away_plays,
+    home_plays = home_plays,
+
+    raw_situ_away = raw_away,
+    raw_situ_home = raw_home,
+
+    situ_away = situ_away,
+    situ_home = situ_home,
+
+    actual_away = actual_away,
+    actual_home = actual_home,
+
+    situation_intercept = SITUATION_INTERCEPT,
+    situation_slope = SITUATION_SLOPE,
+    penalty_yard_weight = PENALTY_YARD_WEIGHT,
+
+    penalty_no_plays = penalty_no_play_n,
+    conversion_overrides = conversion_override_n,
+    unknown_live_penalties = unknown_penalty_n,
+
+    quality = ifelse(
+      manual_n == 0 &&
+      unknown_penalty_n == 0,
+      "A",
+      "CHECK"
+    ),
+
+    manual_checks = manual_n,
+
+    stringsAsFactors = FALSE
+  )
+}
+
+# ============================================================
+# RUN WEEK
+# ============================================================
+
+rows <- list()
+failed <- character()
+
+for (g in GAMES) {
+
+  cat(
+    "\n=== ",
+    g,
+    " ===\n",
+    sep = ""
+  )
+
+  tryCatch({
+
+    rows[[g]] <-
+      extract_game(
+        download_game(g),
+        g
+      )
+
+  }, error = function(e) {
+
+    cat(
+      "SKIPPED ",
+      g,
+      ": ",
+      conditionMessage(e),
+      "\n",
+      sep = ""
+    )
+
+    failed <<- c(
+      failed,
+      g
+    )
+  })
+}
+
+if (!length(rows)) {
+  stop(
+    "No completed games were successfully processed."
+  )
+}
+
+res <- do.call(
+  rbind,
+  rows
+)
+
+rownames(res) <- NULL
+
+# ============================================================
+# VALIDATION
+# ============================================================
+
+if (
+  any(
+    !is.finite(
+      res$raw_situ_away
+    )
+  )
+)
+  stop(
+    "Non-finite away raw Situation."
+  )
+
+if (
+  any(
+    !is.finite(
+      res$raw_situ_home
+    )
+  )
+)
+  stop(
+    "Non-finite home raw Situation."
+  )
+
+expected_away <-
+  SITUATION_INTERCEPT +
+  SITUATION_SLOPE *
+  res$raw_situ_away
+
+expected_home <-
+  SITUATION_INTERCEPT +
+  SITUATION_SLOPE *
+  res$raw_situ_home
+
+if (
+  any(
+    abs(
+      res$situ_away -
+      expected_away
+    ) > 1e-8
+  )
+)
+  stop(
+    "Away Situation calibration failed."
+  )
+
+if (
+  any(
+    abs(
+      res$situ_home -
+      expected_home
+    ) > 1e-8
+  )
+)
+  stop(
+    "Home Situation calibration failed."
+  )
+
+if (
+  any(
+    res$unknown_live_penalties > 0
+  )
+) {
+
+  cat(
+    "\nWARNING: at least one game has an ",
+    "unclassified live penalty.\n"
+  )
+}
+
+# ============================================================
+# OUTPUT
+# ============================================================
+
+results_file <- sprintf(
+  "week%d_situation_results.csv",
+  WEEK
+)
+
+write.csv(
+  res,
+  results_file,
+  row.names = FALSE
+)
+
+write.csv(
+  res,
+  file.path(
+    week_dir,
+    "situation_results.csv"
+  ),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# JAVASCRIPT OUTPUT
+# ------------------------------------------------------------
+
+js <- apply(
+  res,
+  1,
+  function(z) {
+
+    sprintf(
+      paste0(
+        '  {away:"%s",home:"%s",',
+        'actual:[%.3f,%.3f],',
+        'rawSitu:[%.3f,%.3f],',
+        'situ:[%.3f,%.3f],',
+        'quality:"%s"}'
+      ),
+
+      z["away"],
+      z["home"],
+
+      as.numeric(
+        z["actual_away"]
+      ),
+
+      as.numeric(
+        z["actual_home"]
+      ),
+
+      as.numeric(
+        z["raw_situ_away"]
+      ),
+
+      as.numeric(
+        z["raw_situ_home"]
+      ),
+
+      as.numeric(
+        z["situ_away"]
+      ),
+
+      as.numeric(
+        z["situ_home"]
+      ),
+
+      z["quality"]
+    )
+  }
+)
+
+js_name <- paste0(
+  "WEEK",
+  WEEK,
+  "_SITUATION_RESULTS"
+)
+
+js_lines <- c(
+  paste0(
+    "const ",
+    js_name,
+    " = ["
+  ),
+
+  paste(
+    js,
+    collapse = ",\n"
+  ),
+
+  "];"
+)
+
+js_file <- sprintf(
+  "week%d_situation_results.js",
+  WEEK
+)
+
+writeLines(
+  js_lines,
+  js_file
+)
+
+writeLines(
+  js_lines,
+  file.path(
+    week_dir,
+    "situation_results.js"
+  )
+)
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+cat("\n========================================\n")
+
+cat(
+  "SUCCESS — NFL Numbers Week ",
+  WEEK,
+  "\n",
+  sep = ""
+)
+
+cat("========================================\n")
+
+cat(
+  "Completed games processed: ",
+  nrow(res),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Situation calibration: ",
+  SITUATION_INTERCEPT,
+  " + ",
+  SITUATION_SLOPE,
+  " × raw\n",
+  sep = ""
+)
+
+cat(
+  "Accepted live penalty yard weight: ",
+  PENALTY_YARD_WEIGHT,
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Accepted penalty no-plays retained: ",
+  sum(
+    res$penalty_no_plays
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Defensive conversion overrides: ",
+  sum(
+    res$conversion_overrides
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Unknown live penalties: ",
+  sum(
+    res$unknown_live_penalties
+  ),
+  "\n",
+  sep = ""
+)
+
+if (length(failed)) {
+
+  cat(
+    "Available games skipped: ",
+    paste(
+      failed,
+      collapse = ", "
+    ),
+    "\n",
+    sep = ""
+  )
+}
+
+cat("\n")
+
+print(
+  res[
+    ,
+    c(
+      "game",
+      "actual_away",
+      "actual_home",
+      "raw_situ_away",
+      "raw_situ_home",
+      "situ_away",
+      "situ_home",
+      "penalty_no_plays",
+      "conversion_overrides",
+      "unknown_live_penalties",
+      "quality",
+      "manual_checks"
+    )
+  ]
+)
+
+cat(
+  "\nFinal 30/30/40 fair scores are NOT calculated here.\n"
+)
+
+cat(
+  "Use verified official net offensive yardage separately ",
+  "before calculating the final fair score.\n"
+)
