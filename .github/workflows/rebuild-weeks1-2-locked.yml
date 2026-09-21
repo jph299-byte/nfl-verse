@@ -1,0 +1,60 @@
+name: Rebuild Weeks 1 and 2 — locked Situation model
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: 'release'
+
+      - name: Install R packages
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::nflreadr
+            any::dplyr
+            any::stringr
+
+      - name: Calibrate locked model on 2025
+        run: Rscript calibrate_locked_short_yardage_2025.R
+
+      - name: Patch production converter
+        run: Rscript apply_locked_short_yardage_patch.R
+
+      - name: Rebuild Week 1
+        run: Rscript convert_week.R 1
+
+      - name: Preserve Week 1
+        run: |
+          mkdir -p rebuilt/week1
+          cp week1_situation_results.csv rebuilt/week1/
+          cp week1_situation_results.js rebuilt/week1/
+          cp -R output/week01 rebuilt/week1/audit
+
+      - name: Rebuild Week 2
+        run: Rscript convert_week.R 2
+
+      - name: Preserve Week 2
+        run: |
+          mkdir -p rebuilt/week2
+          cp week2_situation_results.csv rebuilt/week2/
+          cp week2_situation_results.js rebuilt/week2/
+          cp -R output/week02 rebuilt/week2/audit
+
+      - name: Preserve calibration
+        run: |
+          cp locked_situation_calibration.csv rebuilt/
+          cp short_yardage_model_comparison.csv rebuilt/
+          cp short_yardage_fold_results.csv rebuilt/
+
+      - name: Upload combined artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weeks1-2-locked-situation
+          path: rebuilt/
