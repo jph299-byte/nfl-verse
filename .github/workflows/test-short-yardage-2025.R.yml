@@ -1,0 +1,38 @@
+name: Test 2025 short-yardage Situation models
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: 'release'
+
+      - name: Install packages
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::nflreadr
+            any::dplyr
+            any::stringr
+
+      - name: Run backtest
+        run: Rscript test_short_yardage_2025.R
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-yardage-2025-test
+          path: |
+            short_yardage_model_comparison.csv
+            short_yardage_fold_results.csv
+            short_yardage_play_breakdown.csv
+            short_yardage_test_notes.txt
+            short_yardage_sequential_game_predictions.csv
+            short_yardage_sequential_summary.csv
+            short_yardage_sequential_windows.csv
