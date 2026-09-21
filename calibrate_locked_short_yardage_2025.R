@@ -219,6 +219,19 @@ if (nrow(tg) != 544) warning("Expected 544 team-games; got ", nrow(tg))
 if (any(!is.finite(tg$official_offensive_yards))) stop("Bad yardage values")
 
 # ------------------------------------------------------------
+# FULL-SAMPLE PRODUCTION CALIBRATION — LOCKED SHORT-YARDAGE MODEL
+locked_fit <- lm(actual_points ~ value_second_4, data=tg)
+locked_calibration <- data.frame(
+  model="second_1_to_4_plus_third_fourth_excess8",
+  intercept=unname(coef(locked_fit)[1]),
+  slope=unname(coef(locked_fit)[2]),
+  team_games=nrow(tg)
+)
+write.csv(locked_calibration, "locked_situation_calibration.csv", row.names=FALSE)
+cat("\nLOCKED PRODUCTION CALIBRATION\n")
+print(locked_calibration)
+
+# ------------------------------------------------------------
 # CROSS-VALIDATION
 # Fit Situation calibration on opposite parity only.
 # Then construct 30/30/40 fair points.
