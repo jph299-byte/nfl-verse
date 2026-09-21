@@ -386,3 +386,144 @@ writeLines(notes, "short_yardage_test_notes.txt")
 print(comparison)
 print(fold)
 print(breakdown)
+
+
+# ============================================================
+# SEQUENTIAL ZERO-SUM POWER-RATING REPLAY
+# Current vs Excess-8 only.
+#
+# Controlled neutral-rating test:
+# - all teams start at 0
+# - pregame predicted neutral margin = rating(team) - rating(opponent)
+# - fair margin comes from the OOS 30/30/40 fair scores above
+# - update is zero-sum
+# - W1 20%, W2 17.5%, W3+ 15%
+# - evaluate NEXT-game prediction against actual margin
+# ============================================================
+
+replay_variants <- c("current", "excess_8")
+replay_input <- pred |>
+  filter(variant %in% replay_variants)
+
+learning_rate <- function(w) {
+  if (w == 1) return(.20)
+  if (w == 2) return(.175)
+  .15
+}
+
+run_replay <- function(v) {
+  x <- replay_input |>
+    filter(variant == v) |>
+    arrange(week, game_id)
+
+  teams <- sort(unique(c(x$posteam, x$opponent)))
+  rating <- setNames(rep(0, length(teams)), teams)
+  out <- list()
+  k <- 1
+
+  for (w in sort(unique(x$week))) {
+    wx <- x |> filter(week == w)
+
+    # Pair each game once. Ratings are frozen at start of week so games
+    # within a week cannot leak information into one another.
+    games <- wx |>
+      inner_join(
+        wx |>
+          select(game_id, posteam, opp_actual=actual_points, opp_fair=fair_points),
+        by=c("game_id","opponent"="posteam")
+      ) |>
+      filter(posteam < opponent)
+
+    week_updates <- setNames(rep(0, length(teams)), teams)
+
+    for (i in seq_len(nrow(games))) {
+      a <- games$posteam[i]
+      b <- games$opponent[i]
+
+      pred_margin <- rating[[a]] - rating[[b]]
+      actual_margin <- games$actual_points[i] - games$opp_actual[i]
+      fair_margin <- games$fair_points[i] - games$opp_fair[i]
+
+      surprise <- fair_margin - pred_margin
+      move <- learning_rate(w) * surprise
+
+      week_updates[[a]] <- week_updates[[a]] + move
+      week_updates[[b]] <- week_updates[[b]] - move
+
+      out[[k]] <- data.frame(
+        variant=v,
+        week=w,
+        game_id=games$game_id[i],
+        team_a=a,
+        team_b=b,
+        pregame_rating_a=rating[[a]],
+        pregame_rating_b=rating[[b]],
+        predicted_margin=pred_margin,
+        actual_margin=actual_margin,
+        fair_margin=fair_margin,
+        surprise=surprise,
+        movement=move,
+        error=pred_margin-actual_margin
+      )
+      k <- k + 1
+    }
+
+    rating <- rating + week_updates
+  }
+
+  bind_rows(out)
+}
+
+replay <- bind_rows(lapply(replay_variants, run_replay))
+
+replay_summary <- replay |>
+  filter(week >= 2) |>
+  group_by(variant) |>
+  summarise(
+    games=n(),
+    rmse=sqrt(mean(error^2)),
+    mae=mean(abs(error)),
+    corr=cor(predicted_margin, actual_margin),
+    .groups="drop"
+  ) |>
+  arrange(rmse)
+
+replay_windows <- bind_rows(
+  lapply(c(2,3,5,9), function(start_week) {
+    replay |>
+      filter(week >= start_week) |>
+      group_by(variant) |>
+      summarise(
+        start_week=start_week,
+        games=n(),
+        rmse=sqrt(mean(error^2)),
+        mae=mean(abs(error)),
+        corr=cor(predicted_margin, actual_margin),
+        .groups="drop"
+      )
+  })
+) |>
+  arrange(start_week, rmse)
+
+write.csv(
+  replay,
+  "short_yardage_sequential_game_predictions.csv",
+  row.names=FALSE
+)
+
+write.csv(
+  replay_summary,
+  "short_yardage_sequential_summary.csv",
+  row.names=FALSE
+)
+
+write.csv(
+  replay_windows,
+  "short_yardage_sequential_windows.csv",
+  row.names=FALSE
+)
+
+cat("\nSEQUENTIAL POWER-RATING REPLAY\n")
+print(replay_summary)
+cat("\nWINDOWS\n")
+print(replay_windows)
