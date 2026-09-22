@@ -1,0 +1,36 @@
+name: Situation v3 audit rebuild
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: 'release'
+
+      - name: Find source audit zip
+        shell: bash
+        run: |
+          set -e
+          ZIP="$(find . -maxdepth 3 -type f -name 'weeks1-2-locked-situation.zip' | head -1)"
+          if [ -z "$ZIP" ]; then
+            echo "weeks1-2-locked-situation.zip is not in the repository."
+            exit 1
+          fi
+          rm -rf situation_input
+          mkdir situation_input
+          unzip -q "$ZIP" -d situation_input
+
+      - name: Rebuild Situation v3 audit
+        run: Rscript situation_v3_audit_rebuild.R situation_input
+
+      - name: Upload audit artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: situation-v3-audit
+          path: situation_input/situation_v3/
