@@ -137,7 +137,6 @@ prepare <- function(season) {
   p <- nflreadr::load_pbp(season) |>
     filter(season_type=="REG")
   if (season==2025) p <- p |> filter(week<=18)
-  if (season==2026) p <- p |> filter(week<=2)
 
   # Ensure optional columns exist across nflverse schema versions.
   defaults <- list(
