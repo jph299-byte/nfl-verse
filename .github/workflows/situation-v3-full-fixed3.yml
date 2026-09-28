@@ -1,8 +1,6 @@
 name: Full Situation v3 rebuild fixed3
-
 on:
   workflow_dispatch:
-
 jobs:
   rebuild:
     runs-on: ubuntu-latest
