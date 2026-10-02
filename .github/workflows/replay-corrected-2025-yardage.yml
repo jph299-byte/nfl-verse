@@ -1,0 +1,27 @@
+name: Replay corrected 2025 Yardage — recovered W1 ratings
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+      - name: Install R packages
+        run: install.packages(c("nflreadr","dplyr","readr"), repos="https://cloud.r-project.org")
+        shell: Rscript {0}
+      - name: Replay 2025 from recovered ratings
+        run: Rscript replay_corrected_2025_yardage.R
+      - name: Upload corrected replay
+        uses: actions/upload-artifact@v4
+        with:
+          name: corrected-2025-yardage-replay-from-original-wk1
+          path: |
+            recovered_pre_week1_2025_ratings_used.csv
+            corrected_2025_yardage_replay_audit.csv
+            corrected_post_2025_yardage_ratings.csv
+            corrected_2025_yardage_rating_snapshots.csv
+            corrected_2025_yardage_replay_summary.txt
+          if-no-files-found: error
