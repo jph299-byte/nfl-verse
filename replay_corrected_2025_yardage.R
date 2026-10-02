@@ -1,105 +1,149 @@
-suppressPackageStartupMessages({
-  library(nflreadr); library(dplyr); library(readr)
-})
-FLATTEN <- 0.40
-DPI_WEIGHT <- 0.50
-lr_for <- function(week) ifelse(week==1,0.20,ifelse(week==2,0.175,0.15))
-n0 <- function(x){x[is.na(x)]<-0;x}
+# Corrected pure-Yardage sequential replay.
+# Uses ONLY the already-verified pure-yardage CSV plus recovered pre-W1 2025 ratings.
+# Base R only: no nflreadr or other packages.
 
-ratings <- read_csv("pre_week1_2025_yardage_ratings.csv", show_col_types=FALSE)
-stopifnot(nrow(ratings)==32, !anyDuplicated(ratings$team))
+flatten <- 0.40
+lg_pass <- 234
+lg_rush <- 121
+
+lr_for <- function(week) {
+  if (week == 1) 0.20 else if (week == 2) 0.175 else 0.15
+}
+
+ratings <- read.csv("pre_week1_2025_yardage_ratings.csv", stringsAsFactors=FALSE)
+obs <- read.csv("pure_yardage_inputs_2025_2026w1-3.csv", stringsAsFactors=FALSE)
+
+stopifnot(nrow(ratings) == 32, length(unique(ratings$team)) == 32)
+# This stage is 2025 only. 2026 is deliberately retained in the source CSV for later.
+obs <- obs[obs$season == 2025, ]
+stopifnot(nrow(obs) == 570)
+
+# nflverse uses LA; recovered app ratings use LAR.
+obs$posteam[obs$posteam == "LA"] <- "LAR"
+
+# Derive opponent from the two team rows for each game, avoiding assumptions about game_id parsing.
+obs$opponent <- NA_character_
+for (gid in unique(obs$game_id)) {
+  ix <- which(obs$game_id == gid)
+  if (length(ix) != 2) stop("Expected exactly two team rows for ", gid)
+  obs$opponent[ix[1]] <- obs$posteam[ix[2]]
+  obs$opponent[ix[2]] <- obs$posteam[ix[1]]
+}
+if (!all(obs$posteam %in% ratings$team) || !all(obs$opponent %in% ratings$team))
+  stop("Team-code mismatch between observations and recovered ratings")
+
 initial <- ratings
+write.csv(initial, "recovered_pre_week1_2025_ratings_used.csv", row.names=FALSE)
 
-pbp <- nflreadr::load_pbp(2025) |>
-  filter(season_type %in% c("REG","POST")) |>
-  mutate(
-    passing_yards=n0(passing_yards), rushing_yards=n0(rushing_yards),
-    yards_gained=n0(yards_gained), sack=n0(sack),
-    penalty=n0(penalty), penalty_yards=n0(penalty_yards),
-    desc=ifelse(is.na(desc),"",desc),
-    penalty_type=ifelse(is.na(penalty_type),"",penalty_type),
-    penalty_team=ifelse(is.na(penalty_team),"",penalty_team),
-    is_dpi=penalty==1 & penalty_yards>0 & penalty_team==defteam &
-      (grepl("pass interference",penalty_type,ignore.case=TRUE) |
-       grepl("pass interference",desc,ignore.case=TRUE)) &
-      !grepl("declined|offsetting|offset penalties|penalties offset",desc,ignore.case=TRUE),
-    dpi_yards=ifelse(is_dpi,penalty_yards,0),
-    sack_net=ifelse(sack==1,pmin(yards_gained,0),0)
+expect_team <- function(team, opp, r) {
+  t <- r[r$team == team, ]
+  o <- r[r$team == opp, ]
+  c(
+    exp_pass = t$off_pass * o$def_pass / lg_pass,
+    exp_rush = t$off_rush * o$def_rush / lg_rush
   )
-
-obs <- pbp |> filter(!is.na(posteam),posteam!="") |>
-  group_by(game_id,season_type,week,posteam,defteam) |>
-  summarise(net_pass=sum(passing_yards)+sum(sack_net),
-            rush=sum(rushing_yards),
-            dpi_yards=sum(dpi_yards),
-            dpi_credit=DPI_WEIGHT*dpi_yards,
-            adj_pass=net_pass+dpi_credit,
-            adj_total=adj_pass+rush,.groups="drop")
-
-# Use recovered entering-W1 league baselines, not sample averages.
-LG_PASS <- 234
-LG_RUSH <- 121
-
-expect_team <- function(team,opp,r){
-  t<-r |> filter(.data$team==team); o<-r |> filter(.data$team==opp)
-  tibble(exp_pass=t$off_pass*o$def_pass/LG_PASS,
-         exp_rush=t$off_rush*o$def_rush/LG_RUSH)
-}
-calc <- function(x,e,lr){
-  raw_share<-ifelse(x$adj_total>0,x$adj_pass/x$adj_total,e$exp_pass/(e$exp_pass+e$exp_rush))
-  exp_share<-e$exp_pass/(e$exp_pass+e$exp_rush)
-  learned_share<-0.60*raw_share+0.40*exp_share
-  lp<-x$adj_total*learned_share; lrush<-x$adj_total-lp
-  tibble(raw_pass_share=raw_share,expected_pass_share=exp_share,
-         learned_pass_share=learned_share,learned_pass=lp,learned_rush=lrush,
-         dpass=lr*(lp-e$exp_pass),drush=lr*(lrush-e$exp_rush))
 }
 
-games <- obs |> distinct(game_id,season_type,week) |>
-  mutate(type_order=ifelse(season_type=="REG",0,1)) |>
-  arrange(type_order,week,game_id)
+audit <- list()
+snapshots <- list()
+ai <- 1
+si <- 1
 
-audit<-list(); snaps<-list()
-for(i in seq_len(nrow(games))){
-  g<-games[i,]; z<-obs |> filter(game_id==g$game_id)
-  if(nrow(z)!=2) stop("Expected two team rows: ",g$game_id)
-  a<-z[1,]; b<-z[2,]
-  ea<-expect_team(a$posteam,a$defteam,ratings); eb<-expect_team(b$posteam,b$defteam,ratings)
-  lr<-lr_for(g$week); ca<-calc(a,ea,lr); cb<-calc(b,eb,lr)
-  audit[[length(audit)+1]]<-bind_cols(a |> select(game_id,season_type,week,team=posteam,opponent=defteam,
-    net_pass,rush,dpi_yards,dpi_credit,adj_pass,adj_total),ea,ca,learning_rate=lr)
-  audit[[length(audit)+1]]<-bind_cols(b |> select(game_id,season_type,week,team=posteam,opponent=defteam,
-    net_pass,rush,dpi_yards,dpi_credit,adj_pass,adj_total),eb,cb,learning_rate=lr)
+# IMPORTANT: freeze ratings at the start of each week.
+# Every game in a week uses the same entering-week ratings; updates are applied only after
+# all games in that week have been evaluated.
+week_keys <- unique(obs[, c("season_type","week")])
+week_keys$type_order <- ifelse(week_keys$season_type == "REG", 0, 1)
+week_keys <- week_keys[order(week_keys$type_order, week_keys$week), ]
 
-  # simultaneous surprises from the pregame state
-  apply_delta<-function(r,team,opp,dp,dr){
-    r$off_pass[r$team==team]<-r$off_pass[r$team==team]+dp
-    r$off_rush[r$team==team]<-r$off_rush[r$team==team]+dr
-    r$def_pass[r$team==opp]<-r$def_pass[r$team==opp]+dp
-    r$def_rush[r$team==opp]<-r$def_rush[r$team==opp]+dr
-    r
+for (wkrow in seq_len(nrow(week_keys))) {
+  st <- week_keys$season_type[wkrow]
+  wk <- week_keys$week[wkrow]
+  wobs <- obs[obs$season_type == st & obs$week == wk, ]
+  entering <- ratings
+  updates <- data.frame(team=ratings$team, off_pass=0, off_rush=0, def_pass=0, def_rush=0)
+  lr <- lr_for(wk)
+
+  for (j in seq_len(nrow(wobs))) {
+    x <- wobs[j, ]
+    e <- expect_team(x$posteam, x$opponent, entering)
+    total <- x$adjusted_offensive_yards
+    raw_share <- if (total > 0) x$adjusted_pass_yards / total else e["exp_pass"] / sum(e)
+    exp_share <- e["exp_pass"] / sum(e)
+    learned_share <- (1 - flatten) * raw_share + flatten * exp_share
+    learned_pass <- total * learned_share
+    learned_rush <- total - learned_pass
+    dpass <- lr * (learned_pass - e["exp_pass"])
+    drush <- lr * (learned_rush - e["exp_rush"])
+
+    audit[[ai]] <- data.frame(
+      game_id=x$game_id, season_type=st, week=wk,
+      team=x$posteam, opponent=x$opponent,
+      net_pass=x$official_net_pass_yards,
+      rush=x$official_rush_yards,
+      dpi_yards=x$accepted_defensive_dpi_yards,
+      dpi_credit=x$dpi_credit,
+      adj_pass=x$adjusted_pass_yards,
+      adj_total=total,
+      exp_pass=e["exp_pass"], exp_rush=e["exp_rush"],
+      raw_pass_share=raw_share, expected_pass_share=exp_share,
+      learned_pass_share=learned_share,
+      learned_pass=learned_pass, learned_rush=learned_rush,
+      dpass=dpass, drush=drush, learning_rate=lr,
+      row.names=NULL
+    )
+    ai <- ai + 1
+
+    ti <- match(x$posteam, updates$team)
+    oi <- match(x$opponent, updates$team)
+    updates$off_pass[ti] <- updates$off_pass[ti] + dpass
+    updates$off_rush[ti] <- updates$off_rush[ti] + drush
+    updates$def_pass[oi] <- updates$def_pass[oi] + dpass
+    updates$def_rush[oi] <- updates$def_rush[oi] + drush
   }
-  ratings<-apply_delta(ratings,a$posteam,a$defteam,ca$dpass,ca$drush)
-  ratings<-apply_delta(ratings,b$posteam,b$defteam,cb$dpass,cb$drush)
-  snaps[[length(snaps)+1]]<-ratings |> mutate(after_game=g$game_id,season_type=g$season_type,week=g$week)
+
+  # Apply all weekly changes simultaneously.
+  ratings$off_pass <- ratings$off_pass + updates$off_pass
+  ratings$off_rush <- ratings$off_rush + updates$off_rush
+  ratings$def_pass <- ratings$def_pass + updates$def_pass
+  ratings$def_rush <- ratings$def_rush + updates$def_rush
+
+  snap <- ratings
+  snap$season_type <- st
+  snap$week <- wk
+  snapshots[[si]] <- snap
+  si <- si + 1
 }
-audit<-bind_rows(audit); snaps<-bind_rows(snaps)
 
-stopifnot(nrow(audit)==570)
-stopifnot(max(abs(audit$learned_pass+audit$learned_rush-audit$adj_total))<1e-8)
+audit <- do.call(rbind, audit)
+snapshots <- do.call(rbind, snapshots)
 
-write_csv(initial,"recovered_pre_week1_2025_ratings_used.csv")
-write_csv(audit,"corrected_2025_yardage_replay_audit.csv")
-write_csv(ratings,"corrected_post_2025_yardage_ratings.csv")
-write_csv(snaps,"corrected_2025_yardage_rating_snapshots.csv")
+# Hard checks.
+if (nrow(audit) != 570) stop("2025 team-game count failed")
+err <- max(abs((audit$learned_pass + audit$learned_rush) - audit$adj_total))
+if (err > 1e-8) stop("Total-yard preservation failed: ", err)
+share_err <- max(abs(audit$learned_pass_share -
+  (0.60 * audit$raw_pass_share + 0.40 * audit$expected_pass_share)))
+if (share_err > 1e-10) stop("40% split-regression identity failed: ", share_err)
+if (any(!is.finite(as.matrix(ratings[,c("off_pass","off_rush","def_pass","def_rush")]))))
+  stop("Non-finite final rating")
+
+write.csv(audit, "corrected_2025_yardage_replay_audit.csv", row.names=FALSE)
+write.csv(ratings, "corrected_post_2025_yardage_ratings.csv", row.names=FALSE)
+write.csv(snapshots, "corrected_2025_yardage_rating_snapshots.csv", row.names=FALSE)
+
 writeLines(c(
- "Corrected 2025 Yardage replay",
- "Starting state: exact wk1 ratings recovered from first retained deploy (2025nflEDIT.xlsx).",
- "Entering league baseline: pass 234, rush 121.",
- "No zero/league-average team initialization.",
- "50% accepted defensive DPI credit to passing.",
- "40% regression of observed pass share toward PRE-GAME expected pass share; total yards preserved.",
- "Learning: W1 20%, W2 17.5%, W3+ 15%.",
- "This workflow deliberately STOPS after the 2025 postseason.",
- "It does not invent the 2025->2026 offseason bridge."
-),"corrected_2025_yardage_replay_summary.txt")
+  "Corrected 2025 Yardage replay",
+  "Starting state: exact pre-Week-1 2025 ratings recovered from first retained deploy.",
+  "Input observations: previously verified pure-yardage CSV; no PBP reconstruction in this workflow.",
+  "No nflreadr and no external R packages.",
+  "Entering league baseline: pass 234, rush 121.",
+  "50% accepted defensive DPI credit is already present in the verified input CSV.",
+  "Learned pass share = 60% observed adjusted share + 40% pre-game expected share.",
+  "Learned pass + learned rush preserves observed adjusted total exactly.",
+  "Ratings are frozen at the start of each week; all weekly updates are simultaneous.",
+  "Learning: W1 20%, W2 17.5%, W3+ 15%.",
+  "This stage stops after the 2025 postseason; no 2026 offseason bridge is invented.",
+  paste("Team-games:", nrow(audit)),
+  paste("Max total-preservation error:", format(err, scientific=TRUE))
+), "corrected_2025_yardage_replay_summary.txt")
