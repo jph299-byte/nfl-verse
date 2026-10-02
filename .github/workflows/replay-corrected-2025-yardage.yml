@@ -9,49 +9,22 @@ permissions:
 jobs:
   replay:
     runs-on: ubuntu-latest
-    env:
-      R_LIBS_USER: ${{ github.workspace }}/R-library
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up R
         uses: r-lib/actions/setup-r@v2
-        with:
-          use-public-rspm: true
 
-      - name: Create R library
-        run: mkdir -p "$R_LIBS_USER"
-
-      - name: Install required R packages
-        shell: Rscript {0}
-        run: |
-          dir.create(Sys.getenv("R_LIBS_USER"), recursive = TRUE, showWarnings = FALSE)
-          install.packages(
-            c("nflreadr", "dplyr", "readr"),
-            lib = Sys.getenv("R_LIBS_USER"),
-            repos = "https://cloud.r-project.org",
-            dependencies = TRUE
-          )
-
-      - name: Verify R packages
-        shell: Rscript {0}
-        run: |
-          .libPaths(c(Sys.getenv("R_LIBS_USER"), .libPaths()))
-          required <- c("nflreadr", "dplyr", "readr")
-          missing <- required[!vapply(required, requireNamespace, logical(1), quietly = TRUE)]
-          if (length(missing)) {
-            stop("Missing required packages: ", paste(missing, collapse = ", "))
-          }
-          cat("Verified packages:", paste(required, collapse = ", "), "\n")
-          cat("Library paths:", paste(.libPaths(), collapse = " | "), "\n")
-
-      - name: Replay 2025 from recovered ratings
+      - name: Verify required input files
         shell: bash
         run: |
-          export R_LIBS_USER="$GITHUB_WORKSPACE/R-library"
-          Rscript replay_corrected_2025_yardage.R
+          test -f replay_corrected_2025_yardage.R
+          test -f pre_week1_2025_yardage_ratings.csv
+          test -f pure_yardage_inputs_2025_2026w1-3.csv
+
+      - name: Replay 2025 from recovered ratings
+        run: Rscript replay_corrected_2025_yardage.R
 
       - name: Upload corrected replay
         uses: actions/upload-artifact@v4
