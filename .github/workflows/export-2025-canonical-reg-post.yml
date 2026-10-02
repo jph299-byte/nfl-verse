@@ -1,0 +1,27 @@
+name: Export canonical 2025 REG + playoffs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: 'release'
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::nflreadr
+            any::dplyr
+            any::stringr
+      - name: Run exact canonical Situation v3 for 2025 REG + POST
+        run: Rscript export_2025_canonical_reg_post.R
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 2025-canonical-three-model-reg-post
+          path: situation_v3_2025_reg_post/
+          if-no-files-found: error
+          retention-days: 90
