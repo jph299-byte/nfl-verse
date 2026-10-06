@@ -1,53 +1,39 @@
 name: Update NFL PBP
-
 on:
   workflow_dispatch:
     inputs:
       week:
-        description: "NFL week — leave blank for latest available"
+        description: "NFL regular-season week (blank = latest available)"
         required: false
         type: string
-
   schedule:
     - cron: "0 10 * * 1,2,5"
-
 permissions:
   contents: read
-
 jobs:
   convert:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up R
-        uses: r-lib/actions/setup-r@v2
-
-      - name: Convert and score NFL games
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: Install canonical engine dependencies
+        run: Rscript -e 'install.packages(c("nflreadr", "dplyr", "stringr"), repos="https://cloud.r-project.org")'
+      - name: Score canonical Situation v3
+        env:
+          REQUESTED_WEEK: ${{ github.event.inputs.week }}
         run: |
-          WEEK="${{ github.event.inputs.week }}"
-          if [ -z "$WEEK" ]; then
-            WEEK="auto"
-          fi
-          Rscript convert_week.R "$WEEK"
-
+          WEEK="$REQUESTED_WEEK"
+          if [ -z "$WEEK" ]; then WEEK=auto; fi
+          Rscript canonical_situation_v3.R "$WEEK"
       - name: Read detected week
         id: detected
-        shell: bash
-        run: |
-          WEEK=$(cat output_week.txt)
-          echo "week=$WEEK" >> "$GITHUB_OUTPUT"
-
-      - name: Upload NFL Numbers outputs
-        uses: actions/upload-artifact@v4
+        run: echo "week=$(cat output_week.txt)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
         with:
-          name: week${{ steps.detected.outputs.week }}-exact-pbp
+          name: week${{ steps.detected.outputs.week }}-canonical-situation-v3
           path: |
-            week${{ steps.detected.outputs.week }}_exact_results.csv
-            week${{ steps.detected.outputs.week }}_results.js
-            output/week*/
-            csv/
+            situation_v3_full/
+            output_week.txt
           if-no-files-found: error
-          retention-days: 90
