@@ -8,6 +8,9 @@ suppressPackageStartupMessages({
 # NFL NUMBERS — SITUATION V3 FULL RAW-PBP REBUILD
 # Locked specification through 2026-09-28.
 YPP <- 14.5
+args <- commandArgs(trailingOnly=TRUE)
+requested_week <- if (length(args) && args[1] != "auto") suppressWarnings(as.integer(args[1])) else NA_integer_
+if (length(args) && args[1] != "auto" && (is.na(requested_week) || requested_week < 1 || requested_week > 18)) stop("Week must be auto or 1..18")
 OUT <- "situation_v3_full"
 dir.create(OUT, recursive=TRUE, showWarnings=FALSE)
 
@@ -225,6 +228,12 @@ write.csv(tg25,file.path(OUT,"situation_v3_2025_team_games.csv"),row.names=FALSE
 
 # 2026 season-to-date under the locked 2025 calibration.
 p26 <- prepare(2026)
+# Never score future/live games. Freeze requested week against completed PBP only.
+if (!is.na(requested_week)) p26 <- p26 |> filter(week <= requested_week)
+if (!nrow(p26)) stop("No completed PBP available for requested week")
+if (all(c("away_score","home_score") %in% names(p26))) p26 <- p26 |> filter(is.finite(away_score), is.finite(home_score))
+if (!nrow(p26)) stop("No completed games after final-score check")
+writeLines(as.character(max(p26$week)), "output_week.txt")
 
 fg_check <- p26 |> filter(znum(field_goal_attempt)==1)
 bad_fg <- fg_check |>
